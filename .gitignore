@@ -1,0 +1,11 @@
+# Binaries and build output
+bin/
+/nomad-operator
+# Go
+*.test
+*.out
+# Editor/OS
+.DS_Store
+# Temp
+.docs.tmp/
+.claude/worktrees/
