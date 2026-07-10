@@ -5,7 +5,8 @@
 | **Component** | `nomad-operator` — a Kubernetes operator that provisions and manages a Nomad control plane on K8s, with workloads on edge clients |
 | **This document** | Design for the **Control Plane slice** (slice 2 of 6) — the first slice that stands up real Nomad servers and produces the authenticated endpoint later slices consume |
 | **Target runtime** | Nomad **v2.0.4**; K8s 1.28+ with Gateway API + Cilium (LBIPAM + Gateway); Go **1.26.4** |
-| **Status** | Approved 2026-07-10 — ready for implementation plan |
+| **Status** | Approved 2026-07-10; amended 2026-07-10 after an independent sr-go-engineer (Fable) design review — ready for implementation plan |
+| **Review amendments** | Folded review findings: bootstrap-deadlock fix (`podManagementPolicy: Parallel` + `publishNotReadyAddresses`, §3.2); ACL made idempotent via `BootstrapOpts` + Secret-as-source-of-truth + corrected reset runbook (§3.3); config-hash rollout + `rpcPorts` immutable (§3.1/§3.2/§3.7); `httpHostname`/`localhost` cert SANs (§3.3); injectable client factory + Gateway-API experimental-channel CRDs (§3.6/§5/§7); deletion/teardown retention (§3.8); plus minors M2/M4/M5/M8/M9 |
 | **Builds on** | `docs/designs/2026-07-09-nomad-operator-foundation-design.md` (slice 1, merged) — §2 roadmap, §4.2 client seam |
 
 ---
@@ -100,8 +101,8 @@ spec:
     ref:                              # required iff mode=Existing
       name: shared-gw
       namespace: gateway-system
-    rpcPorts: [14647, 24647, 34647]   # len == servers; one L4 listener port per server
-    httpHostname: nomad.example.com   # hostname for the HTTP/TLS route to the API/UI
+    rpcPorts: [14647, 24647, 34647]   # len == servers; IMMUTABLE (bears Raft identity); one port/server
+    httpHostname: nomad.example.com   # hostname for the HTTP/TLS route to the API/UI (must be a cert SAN)
 
   resources: {}                       # optional; pod resource requests/limits
 
@@ -143,7 +144,9 @@ status:
 - **Persistent Raft state.** `volumeClaimTemplates` → one PV per pod mounted at Nomad's `data_dir`,
   so Raft logs/snapshots survive pod restarts and rescheduling.
 - **Anti-affinity.** `requiredDuringSchedulingIgnoredDuringExecution` pod anti-affinity on hostname —
-  one server per node, so a single node loss never costs quorum.
+  one server per node, so a single node loss never costs quorum. This requires **≥ `servers`
+  schedulable nodes**; with fewer, pods stay `Pending` (surfaced as a clear condition, not a silent
+  hang).
 - **Per-pod config via an init container.** StatefulSet pods share a template but each server needs a
   distinct `advertise.rpc`. An init container reads the pod ordinal from its own name, selects
   `rpcPorts[ordinal]`, and renders the final agent config with:
@@ -155,36 +158,69 @@ status:
 
   This is the standard StatefulSet per-pod-config idiom. `status.gatewayAddress` + `rpcPorts` are
   delivered to the init container via an operator-rendered **ConfigMap** (the init container cannot
-  read CR status directly).
+  read CR status directly). Gossip **key material is never in the ConfigMap** — it is a Secret mount
+  (§3.3); the ConfigMap carries only non-secret wiring (addresses, ports, region/DC).
+- **Bootstrap reachability — two non-default knobs are REQUIRED, or the cluster deadlocks.** With
+  `bootstrap_expect = servers` and a leader-gated readiness probe (§3.7), no pod is Ready until a
+  quorum forms, and no quorum can form unless pre-Ready pods can reach each other:
+  - **`podManagementPolicy: Parallel`** on the StatefulSet — the default `OrderedReady` never creates
+    pod-1 until pod-0 is Ready, which can never happen alone. (This is independent of
+    `updateStrategy`, so the ordered rolling update in §3.7 still holds.)
+  - **`publishNotReadyAddresses: true`** on the headless Service **and** the per-pod ClusterIP
+    Services — otherwise NotReady endpoints are withheld, so Serf `retry_join` can't resolve peers and
+    the `TCPRoute` backends are empty (Envoy has nothing to forward Raft/RPC to) until quorum exists,
+    which it never will. This is exactly what the Consul/Vault Helm charts set for the same reason.
+- **ConfigMap changes must roll the StatefulSet.** The init container reads the ConfigMap only at pod
+  start, so a ConfigMap update alone changes nothing. The operator therefore stamps a **hash of the
+  rendered config into a pod-template annotation**; when `gatewayAddress`/ports/region change, the
+  hash changes, the pod template changes, and the StatefulSet rolls (quorum-safe, per §3.7). Without
+  this, servers advertise stale addresses indefinitely (e.g. after an LBIPAM address reassignment).
 
 ### 3.3 Security (hybrid)
 
 Three distinct materials, each owned by whoever is best at it:
 
 - **mTLS — cert-manager.** The user creates a cert-manager `Certificate` (referencing their issuer)
-  whose Secret is named by `spec.tls.certSecretRef`, with SANs `server.<region>.nomad` and
-  `client.<region>.nomad`. The operator mounts it into the server pods and enables
+  whose Secret is named by `spec.tls.certSecretRef`. Required SANs:
+  - `server.<region>.nomad` and `client.<region>.nomad` — the role/region names Nomad's own mTLS
+    verifies (the operator's `api.Client` sets `TLSServerName = server.<region>.nomad` and presents
+    the client cert; it does **not** depend on the dialed address appearing in a SAN);
+  - **`spec.gateway.httpHostname`** — so a standard TLS client (browser/`curl`/API SDK) dialing the
+    external HTTP front door verifies natively. With `TLSRoute` passthrough (§8 default) the route
+    matches on SNI == `httpHostname`, so the cert **must** carry it or verification/routing conflict
+    (a client that overrides `tls_server_name=server.<region>.nomad` sends that as SNI and misses the
+    route — documented caveat for the `nomad` CLI hitting the external endpoint);
+  - **`localhost` / `127.0.0.1`** — so in-pod CLI/debug (`nomad`/`curl` exec'd in a server pod) works,
+    per Nomad's TLS guide.
+
+  The operator mounts the Secret into the pods and enables
   `tls { http = true, rpc = true, verify_server_hostname = true, verify_https_client = true }`.
-  Because verification is role/region-based, the operator's own `api.Client` sets
-  `TLSServerName = server.<region>.nomad` and presents the client cert — it does **not** depend on
-  the dialed address appearing in a SAN.
 - **Gossip — operator-generated.** On first reconcile the operator generates a 32-byte base64 key,
   stores it in the Secret named by `status.gossipKeySecretRef`, and mounts it as
   `server { encrypt = "…" }`. The same key is used by all servers in the region. (Key **rotation** is
   out of scope.)
-- **ACL — operator-bootstrapped.** Servers run with `acl { enabled = true }`. After the cluster
-  reaches quorum and elects a leader, the reconciler calls `ACLTokens().Bootstrap()` **exactly once**
-  and captures the management token.
+- **ACL — operator-bootstrapped, made idempotent via an operator-supplied token.** Servers run with
+  `acl { enabled = true }`. The naive `ACLTokens().Bootstrap()` returns the management secret-ID
+  **once only**, opening a lost-token window (crash between the call and the Secret write = the token
+  is irrecoverable). The pinned `api` exposes `ACLTokens().BootstrapOpts(bootstrapToken, q)` (an
+  operator-supplied bootstrap token, supported since Nomad 1.1), which removes that window entirely:
 
-  **Correctness requirement — the bootstrap token is returned once.** The reconciler MUST write the
-  management-token Secret **before** it sets the `ACLBootstrapped` condition to true, and MUST NOT
-  re-attempt bootstrap once that condition is true and the Secret exists. If `Bootstrap()` returns an
-  "already bootstrapped" error while the condition/Secret are absent (e.g. a manual bootstrap
-  happened out of band), the reconciler surfaces a `Degraded`/`ACLBootstrapped=False` condition with
-  a clear message rather than looping. **Documented recovery:** if the token Secret is ever lost
-  after a successful bootstrap, an operator must run `nomad acl bootstrap-reset` on the cluster and
-  let the reconciler re-bootstrap — this is a manual, destructive-to-the-token operation, called out
-  in the runbook.
+  1. Generate the management token value and **write the token Secret first**
+     (`status.bootstrapTokenSecretRef`).
+  2. After the cluster reaches quorum and elects a leader, call `BootstrapOpts(<that token>, …)`.
+  3. Treat "already bootstrapped" as success **iff** our Secret already holds the active token; the
+     step is now safely retryable — a crash-and-retry re-submits the same token.
+
+  **Source of truth is the Secret, not the condition.** Re-bootstrap is gated on the existence of the
+  deterministically-named token Secret, never on the `ACLBootstrapped` status condition (status is not
+  durable — a restore or status wipe must not trigger a re-bootstrap, and the token can't be
+  re-observed). The condition is derived from the Secret, never load-bearing.
+
+  **Documented recovery (corrected — there is no `nomad acl bootstrap-reset` command).** If the token
+  Secret is ever lost after a successful bootstrap: attempt a bootstrap to read the **reset index**
+  from the error, write that index to `<data_dir>/server/acl-bootstrap-reset` **on the leader pod**
+  (exec into it / its PVC), then let the reconciler re-bootstrap with a freshly generated token. This
+  is manual and invasive; it is spelled out in the runbook.
 
 ### 3.4 External join surface (all-under-Gateway)
 
@@ -214,7 +250,7 @@ rendering are **single-sourced** across both modes.
 | Concern | **Managed** *(default)* | **Existing** |
 |---|---|---|
 | Gateway resource | Operator creates a **dedicated** Gateway from `spec.gateway.className`, with the HTTP listener + `servers` TCP listeners | User owns a **shared** Gateway (`spec.gateway.ref`); operator **never mutates** it |
-| Listeners on `rpcPorts` + HTTP | Operator owns and reconciles them | **User pre-provisions** them; reconcile sets `GatewayReady=False`/`Pending` with a precise message if a required listener/port is missing |
+| Listeners on `rpcPorts` + HTTP | Operator owns and reconciles them | **User pre-provisions** them; reconcile sets `GatewayReady=False`/`Pending` with a precise message if a required listener/port is missing, **or** if the listeners' `allowedRoutes.namespaces` do not admit the CR's namespace (cross-namespace `parentRefs` are otherwise silently rejected) |
 | `TCPRoute`s / HTTP route + per-pod Services | Operator owns (attach via `parentRefs` to the created Gateway) | Operator owns (attach via `parentRefs` → `spec.gateway.ref`, by port / `sectionName`) |
 | `status.gatewayAddress` | Observed from the created Gateway's assigned address | Read from the referenced Gateway's assigned address |
 
@@ -269,16 +305,31 @@ change to the Foundation package and is purely additive (empty string preserves 
 
 **Contract extension (honoring the Foundation existence-only-pin gotcha).** `contract.go` gains pins
 for the new `api` surface this slice binds to — the ACL bootstrap call, leader/peer reads, and a
-server-health read used for readiness/quorum:
+server-health read used for readiness/quorum (all confirmed present in the pinned `api`
+`v0.0.0-20260707172059-5b83b133998a`):
 
-- `(*api.ACLTokens).Bootstrap`, `api.ACLToken`
+- `(*api.ACLTokens).BootstrapOpts`, `api.ACLToken` (operator-supplied token — see §3.3)
 - `(*api.Status).Leader`, `(*api.Status).Peers`
-- `(*api.Agent).Health` (or `(*api.Operator).RaftGetConfiguration` + `api.RaftConfiguration`)
+- `(*api.Agent).Health` + `api.AgentHealthResponse` (or `(*api.Operator).RaftGetConfiguration` +
+  `api.RaftConfiguration`)
 
 Each new pin **must be backed by a real call** in the reconciler/client (method-expression pins guard
 symbol *existence*, not *signature shape*; drift is only caught because the code actually calls them
-with concrete arguments). Exact symbols are confirmed against the pinned `api` during implementation
-and reflected in the client wrapper.
+with concrete arguments).
+
+**Two wrapper notes.** (1) `Status().Leader`, `Status().Peers`, and `Agent().Health` take no
+`QueryOptions`, so `ctx` cannot be threaded through them — the same quirk already documented for
+`Ping` in `internal/nomad/client.go`; keep the uniform `ctx`-accepting signatures and note it.
+(2) `Status().Leader()` returns `"ip:port"`; mapping it to a friendly `status.leader`
+(e.g. `prod-server-1.global`) requires a port→ordinal lookup via `rpcPorts` — a small documented
+helper, not guesswork.
+
+**Injectable client factory (a real seam with a present consumer — the envtest).** envtest runs no
+Nomad, so the reconciler must construct its `Client` through an injectable factory field
+(`func(nomad.Config) (NomadReader, error)`, defaulting to `nomad.New`) that tests replace with a fake.
+This is not speculative abstraction — §5's phase-transition and ACL-bootstrap-once tests are the
+consumer that exists now. The consumer-side interface (`NomadReader`/`NomadBootstrapper`) is defined
+at the reconciler per the Go interface-at-consumer convention.
 
 ### 3.7 Rolling upgrades (KISS, quorum-safe)
 
@@ -287,13 +338,36 @@ No custom upgrade controller. Quorum safety is delegated to Kubernetes primitive
 - **StatefulSet `RollingUpdate`** — ordered, one pod replaced at a time.
 - **PodDisruptionBudget `minAvailable = servers - 1`** (2 of 3) — voluntary disruptions never take a
   second server.
-- **Raft-aware readiness probe** — the pod reports Ready only when the server has rejoined and quorum
-  is intact (`GET /v1/agent/health?type=server`). Because the StatefulSet waits for pod *N* to be
-  Ready before touching pod *N+1*, K8s never removes a second server until the first is healthy
-  again.
+- **Raft-aware readiness probe** — the pod reports Ready only when the server has rejoined and a
+  leader is known (`GET /v1/agent/health?type=server` is healthy ⇔ leader known). Because the
+  StatefulSet waits for pod *N* to be Ready before touching pod *N+1*, K8s never removes a second
+  server until the first is healthy again.
+- **Liveness, if any, is process-level — NOT the leader-gated check.** A leader-gated liveness probe
+  would fail *all* servers during a quorum loss and restart-storm them, which makes Raft recovery
+  strictly worse. Liveness checks only that the agent process is up.
 
-This covers image/version bumps and config changes. Explicit leader step-down / drain orchestration
-is a later hardening concern, not slice 2.
+This covers image/version bumps. It also covers **config changes**, but only via the config-hash
+pod-template annotation from §3.2 — a ConfigMap edit alone does not roll the StatefulSet. Explicit
+leader step-down / drain orchestration is a later hardening concern, not slice 2.
+
+**Observability caveat (M9).** Because the in-cluster API ClusterIP Service is Ready-gated, a full
+quorum loss empties it, so the operator observes `Degraded` via read *errors*, not health reads. This
+is acceptable; if richer signal is wanted, the operator can poll the per-pod Services (which carry
+`publishNotReadyAddresses`, §3.2).
+
+### 3.8 Deletion & teardown
+
+On `NomadCluster` delete, ownerReferences cascade-delete the operator-created workloads and networking
+(StatefulSet, Services, PDB, ConfigMap, HTTP route, `TCPRoute`s, and — in Managed mode — the dedicated
+Gateway). Two things are **deliberately retained** and must not be swept by the cascade:
+
+- **PVCs (Raft state).** `volumeClaimTemplates` PVCs are retained by default (StatefulSet does not
+  delete them); this is intentional — accidental deletion is data loss. Documented, not automated.
+- **The token & gossip Secrets.** The ACL management-token Secret is the **only copy of an
+  unrecoverable credential**; it (and the gossip key) are retained unless the user explicitly opts
+  into cleanup. A finalizer is **not** used to auto-purge them.
+
+Existing-mode Gateways are never touched (the operator only owns the Routes/backends it created).
 
 ## 4. Definition of Done
 
@@ -315,14 +389,19 @@ is a later hardening concern, not slice 2.
 - **Unit:** CRD defaulting/validation (incl. `servers` immutability, `rpcPorts` length == `servers`,
   gateway-mode field requirements); per-ordinal advertise-address rendering; Client construction from
   a CR (incl. `TLSServerName`); quorum math.
-- **Envtest:** reconcile creates the expected StatefulSet / headless + per-pod + API Services / PDB /
+- **Envtest:** reconcile creates the expected StatefulSet (with `podManagementPolicy: Parallel` +
+  config-hash annotation) / headless + per-pod + API Services (with `publishNotReadyAddresses`) / PDB /
   HTTP route / per-server `TCPRoute`s / Gateway (Managed) or the correct `parentRefs` (Existing);
-  status phase transitions; the ACL-bootstrap-once ordering (token Secret written before the
-  condition flips; no re-bootstrap when the condition is set).
+  status phase transitions; ACL-bootstrap ordering (**token Secret written before `BootstrapOpts`;
+  Secret existence — not the condition — gates re-bootstrap**). Two envtest prerequisites: (i) the
+  injectable Nomad-client factory (§3.6) is stubbed with a fake, since envtest runs no Nomad and no
+  pod/Gateway controllers (the operator manually stubs the Gateway's assigned address); (ii) the
+  **Gateway API CRDs must be installed into envtest, from the experimental channel** — `TCPRoute` and
+  `TLSRoute` are `v1alpha2` experimental-channel types absent from the standard install.
 - **Hermetic integration (extends Foundation's dev-agent test):** boot an ephemeral **ACL-enabled**
-  Nomad v2.0.4, exercise `Bootstrap()` → capture token → construct the authenticated `Client` → read.
-  This also closes Foundation open-item #1 (observe the real node-status value set) when a `nomad`
-  v2.0.4 binary is present.
+  Nomad v2.0.4, exercise `BootstrapOpts()` → capture token → construct the authenticated `Client` →
+  read. This also closes Foundation open-item #1 (observe the real node-status value set) when a
+  `nomad` v2.0.4 binary is present.
 - **Manual/live:** the documented external client join.
 
 ## 6. Interaction with the slice roadmap
@@ -331,9 +410,11 @@ This slice produces the authenticated, reachable endpoint that slice 3 (`NomadNo
 consume via the same per-cluster `Client`. It touches `cmd/main.go` for the first time (registers the
 `NomadCluster` controller), adds `api/v1alpha1/nomadcluster_types.go`, an
 `internal/controller/nomadcluster_controller.go`, and extends `internal/nomad` (the `TLSServerName`
-field + the write/health surface + `contract.go` pins). It introduces no new heavyweight
-dependencies: server-side `Jobs().ParseHCL` remains the job path for later slices; no `jobspec2`, no
-`nomad-openapi`.
+field + the write/health surface + `contract.go` pins). **One new direct dependency** is warranted by
+a present requirement: `sigs.k8s.io/gateway-api` (typed `Gateway`/`TCPRoute`/`TLSRoute`/`HTTPRoute`),
+pinned to a version whose **experimental channel** carries `TCPRoute`/`TLSRoute` (they are not in the
+standard channel). No other additions: server-side `Jobs().ParseHCL` remains the job path for later
+slices; no `jobspec2`, no `nomad-openapi`.
 
 ## 7. Explicit assumptions to verify at plan/implementation time
 
@@ -342,7 +423,9 @@ dependencies: server-side `Jobs().ParseHCL` remains the job path for later slice
    cluster cannot form. Verify with a pod-to-gatewayAddress dial before relying on it; the
    LoadBalancer fallback (§3.4) is the escape hatch if this fails.
 2. **The Cilium `GatewayClass` supports multiple TCP (L4) listeners** and `TCPRoute` on one Gateway
-   (Managed mode), and exposes an address that can host `servers` distinct listener ports.
+   (Managed mode), and exposes an address that can host `servers` distinct listener ports. This also
+   means the **Gateway API experimental-channel CRDs** (`TCPRoute`/`TLSRoute`, `v1alpha2`) must be
+   installed in the target cluster — a real deploy-time prerequisite, not only an envtest one.
 3. **A `nomad` v2.0.4 binary is available in CI/dev** to exercise the hermetic ACL test (still
    outstanding from Foundation; also closes open-item #1).
 4. The exact `api` symbols for leader/peer/health reads (§3.6) are confirmed against the pinned `api`
