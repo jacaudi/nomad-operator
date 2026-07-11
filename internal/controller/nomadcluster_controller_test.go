@@ -149,14 +149,55 @@ var _ = Describe("Managed provisioning", func() {
 		Expect(meta_IsStatusConditionFalse(got.Status.Conditions, nomadv1alpha1.CondQuorumHealthy)).To(BeTrue())
 	})
 
-	// Ready->Degraded (QuorumLost) on leader loss is NOT covered here: it is
-	// unreachable via the full Reconcile() path as currently written. See
-	// nomadcluster_controller.go:143 (Reconcile unconditionally sets
-	// nc.Status.Phase = PhaseBootstrapping immediately before calling
-	// bootstrapAndReady) vs. nomadcluster_controller.go:205 (bootstrapAndReady's
-	// `if nc.Status.Phase == PhaseReady` guard, which can therefore never be
-	// true). Filed as a finding in .superpowers/sdd/task-8-report.md rather than
-	// fixed here, per this fix task's "no production behavior change" scope.
+	It("transitions Ready to Degraded (QuorumLost) when the fake later reports no leader", func() {
+		ctx := context.Background()
+		ns := "mgd-quorumlost"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, "nomad-tls", ns)
+		nc := minimalCluster("quorumlost", ns)
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+
+		// Same mutable fake+reconciler reused across all three reconciles below,
+		// matching the pattern in the two specs above.
+		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+
+		// First reconcile creates the Gateway (no address yet) → Pending.
+		reconcileOnce(r, "quorumlost", ns)
+		gwName := names(nc).Gateway
+		var gw gwapiv1.Gateway
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: gwName, Namespace: ns}, &gw)).To(Succeed())
+		gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: "10.0.0.5"}}
+		Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
+
+		// Second reconcile provisions workloads and, with a leader reported,
+		// reaches Ready.
+		reconcileOnce(r, "quorumlost", ns)
+		var afterReady nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "quorumlost", Namespace: ns}, &afterReady)).To(Succeed())
+		Expect(afterReady.Status.Phase).To(Equal(nomadv1alpha1.PhaseReady))
+
+		// Mutate the same fake to report no leader, then reconcile again. This
+		// exercises bootstrapAndReady's Ready->Degraded guard
+		// (nomadcluster_controller.go ~202-206), which requires Reconcile to
+		// preserve the Ready phase instead of clobbering it to Bootstrapping
+		// before calling bootstrapAndReady (nomadcluster_controller.go ~143).
+		fake.leader = ""
+		fake.serverHealthy = false
+		reconcileOnce(r, "quorumlost", ns)
+
+		var afterLoss nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "quorumlost", Namespace: ns}, &afterLoss)).To(Succeed())
+		Expect(afterLoss.Status.Phase).To(Equal(nomadv1alpha1.PhaseDegraded))
+		Expect(meta_IsStatusConditionFalse(afterLoss.Status.Conditions, nomadv1alpha1.CondReady)).To(BeTrue())
+		reason := ""
+		for _, c := range afterLoss.Status.Conditions {
+			if c.Type == nomadv1alpha1.CondReady {
+				reason = c.Reason
+			}
+		}
+		Expect(reason).To(Equal("QuorumLost"))
+	})
 })
 
 func reconcileOnce(r *NomadClusterReconciler, name, ns string) {

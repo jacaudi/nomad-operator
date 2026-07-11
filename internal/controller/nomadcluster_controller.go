@@ -140,7 +140,11 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// 4. Bootstrapping: wait for quorum, then ACL bootstrap.
-	nc.Status.Phase = nomadv1alpha1.PhaseBootstrapping
+	// Preserve a Ready/Degraded phase so bootstrapAndReady can evaluate quorum
+	// loss (Ready->Degraded); only seed Bootstrapping from the initial gate.
+	if nc.Status.Phase == nomadv1alpha1.PhasePending || nc.Status.Phase == "" {
+		nc.Status.Phase = nomadv1alpha1.PhaseBootstrapping
+	}
 	return r.bootstrapAndReady(ctx, &nc, gwAddr)
 }
 
