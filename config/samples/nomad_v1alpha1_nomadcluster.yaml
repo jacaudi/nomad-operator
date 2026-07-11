@@ -1,0 +1,9 @@
+apiVersion: nomad.operator.io/v1alpha1
+kind: NomadCluster
+metadata:
+  labels:
+    app.kubernetes.io/name: nomad-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: nomadcluster-sample
+spec:
+  # TODO(user): Add fields here

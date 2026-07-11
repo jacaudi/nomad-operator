@@ -34,6 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
 	"github.com/jacaudi/nomad-operator/internal/controller"
@@ -49,6 +51,8 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(nomadv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(gwapiv1.Install(scheme))
+	utilruntime.Must(gwapiv1a2.Install(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 

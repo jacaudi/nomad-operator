@@ -22,40 +22,72 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
+	"github.com/jacaudi/nomad-operator/internal/nomad"
 )
 
-// NomadClusterReconciler reconciles a NomadCluster object
+// NomadOps is the subset of the Nomad client the reconciler needs. Defined at
+// the consumer per Go convention; *nomad.Client satisfies it, and envtest
+// injects a fake.
+type NomadOps interface {
+	Ping(ctx context.Context) error
+	Leader(ctx context.Context) (string, error)
+	ServerHealthy(ctx context.Context) (bool, error)
+	ACLBootstrap(ctx context.Context, bootstrapToken string) (string, error)
+}
+
+// NomadClientFactory builds a NomadOps from an explicit per-cluster Config.
+type NomadClientFactory func(cfg nomad.Config) (NomadOps, error)
+
+// DefaultNomadClientFactory constructs the real client.
+func DefaultNomadClientFactory(cfg nomad.Config) (NomadOps, error) {
+	return nomad.New(cfg)
+}
+
+// NomadClusterReconciler reconciles a NomadCluster object.
 type NomadClusterReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme         *runtime.Scheme
+	NewNomadClient NomadClientFactory
 }
 
 // +kubebuilder:rbac:groups=nomad.operator.io,resources=nomadclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nomad.operator.io,resources=nomadclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nomad.operator.io,resources=nomadclusters/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways;tcproutes;tlsroutes;httproutes,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the NomadCluster object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
 func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
-	// TODO(user): your logic here
+	var nc nomadv1alpha1.NomadCluster
+	if err := r.Get(ctx, req.NamespacedName, &nc); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
 
+	// Phase machine is filled in by later tasks. For now, establish the
+	// Reconciled condition and observedGeneration so the resource is live.
+	if nc.Status.Phase == "" {
+		nc.Status.Phase = nomadv1alpha1.PhasePending
+	}
+	nc.Status.ObservedGeneration = nc.Generation
+	setCondition(&nc, nomadv1alpha1.CondReconciled, metav1ConditionTrue, "Accepted", "spec accepted")
+
+	if err := r.Status().Update(ctx, &nc); err != nil {
+		logger.Error(err, "status update failed")
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
 func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.NewNomadClient == nil {
+		r.NewNomadClient = DefaultNomadClientFactory
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nomadv1alpha1.NomadCluster{}).
 		Named("nomadcluster").
