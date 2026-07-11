@@ -98,13 +98,12 @@ func TestACLBootstrapAndLeaderLive(t *testing.T) {
 		t.Fatalf("no leader elected: %v", err)
 	}
 
-	token := devToken
-	secretID, err := c.ACLBootstrap(ctx, token)
+	secretID, err := c.ACLBootstrap(ctx, devToken)
 	if err != nil {
 		t.Fatalf("ACLBootstrap: %v", err)
 	}
-	if secretID != token {
-		t.Fatalf("BootstrapOpts returned %q, want supplied token %q", secretID, token)
+	if secretID != devToken {
+		t.Fatalf("BootstrapOpts returned %q, want supplied token %q", secretID, devToken)
 	}
 
 	// Authenticated read with the token.
