@@ -81,6 +81,16 @@ func TestTCPRoutesOnePerServer(t *testing.T) {
 	}
 }
 
+// TestSingleServerOneTCPRoute guards FR-1: a servers=1 control plane uses
+// exactly one rpcPort and therefore exactly one per-server TCPRoute.
+func TestSingleServerOneTCPRoute(t *testing.T) {
+	nc := singleServerCluster("prod", "nomad-system")
+	routes := buildTCPRoutes(nc)
+	if len(routes) != 1 {
+		t.Fatalf("tcp routes = %d, want 1", len(routes))
+	}
+}
+
 // sharedGatewayFixture builds a user-owned Gateway named "shared-gw" with an
 // HTTP listener (hostname "nomad.example.com", matching minimalCluster's
 // default) plus one TCP listener per given port, admitting routes from all

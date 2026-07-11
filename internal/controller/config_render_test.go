@@ -28,3 +28,14 @@ func TestRenderConfigDeterministicHash(t *testing.T) {
 	}
 	_ = hcl2
 }
+
+// TestRenderConfigSingleServerBootstrapExpect guards FR-1: a servers=1
+// control plane renders bootstrap_expect=1, so Raft bootstraps immediately
+// without waiting to see peers.
+func TestRenderConfigSingleServerBootstrapExpect(t *testing.T) {
+	nc := singleServerCluster("prod", "nomad-system")
+	hcl, _ := renderConfig(nc, "10.0.0.5")
+	if !strings.Contains(hcl, "bootstrap_expect = 1") {
+		t.Errorf("rendered config missing bootstrap_expect = 1:\n%s", hcl)
+	}
+}

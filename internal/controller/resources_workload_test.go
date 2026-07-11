@@ -160,3 +160,24 @@ func TestInitEntrypointInjectsGossipKey(t *testing.T) {
 		t.Error("initEntrypoint does not inject the gossip encrypt key into the overlay HCL")
 	}
 }
+
+// TestSingleServerPDBAllowsReschedule guards FR-1: a servers=1 control plane
+// has minAvailable=0, so the StatefulSet controller may reschedule/drain the
+// single pod (a brief control-plane outage, not a blocked eviction).
+func TestSingleServerPDBAllowsReschedule(t *testing.T) {
+	nc := singleServerCluster("prod", "nomad-system")
+	pdb := buildPDB(nc)
+	if pdb.Spec.MinAvailable.IntValue() != 0 {
+		t.Errorf("minAvailable = %d, want servers-1 = 0", pdb.Spec.MinAvailable.IntValue())
+	}
+}
+
+// TestSingleServerStatefulSetReplicas guards FR-1: a servers=1 control plane
+// runs exactly one StatefulSet replica.
+func TestSingleServerStatefulSetReplicas(t *testing.T) {
+	nc := singleServerCluster("prod", "nomad-system")
+	ss := buildStatefulSet(nc, "abc123")
+	if *ss.Spec.Replicas != 1 {
+		t.Errorf("replicas = %d, want 1", *ss.Spec.Replicas)
+	}
+}

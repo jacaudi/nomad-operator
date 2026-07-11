@@ -89,7 +89,7 @@ type GatewaySpec struct {
 	// +optional
 	Ref *GatewayRef `json:"ref,omitempty"`
 	// RPCPorts is one L4 listener port per server; length must equal spec.servers.
-	// +kubebuilder:validation:MinItems=3
+	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="rpcPorts is immutable"
 	RPCPorts []int32 `json:"rpcPorts"`
 	// +kubebuilder:validation:Required
@@ -102,7 +102,15 @@ type GatewaySpec struct {
 type NomadClusterSpec struct {
 	// +kubebuilder:validation:Required
 	Image string `json:"image"`
-	// +kubebuilder:validation:Enum=3;5
+	// Servers is the number of Raft control-plane servers. 3 or 5 give full
+	// Raft HA (survives 1 or 2 node failures respectively) and are recommended
+	// for production. 1 is a non-HA, single-node control plane for edge/dev
+	// deployments: on Kubernetes a failed control-plane pod is rescheduled by
+	// the StatefulSet controller, so the outage is bounded by the reschedule
+	// time rather than open-ended, but there is no Raft quorum to fail over to
+	// while the pod is down. Even counts are always rejected (split-brain
+	// safety).
+	// +kubebuilder:validation:Enum=1;3;5
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="servers is immutable"
 	Servers int32 `json:"servers,omitempty"`

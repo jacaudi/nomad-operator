@@ -89,7 +89,7 @@ spec:
                     items:
                       format: int32
                       type: integer
-                    minItems: 3
+                    minItems: 1
                     type: array
                     x-kubernetes-validations:
                     - message: rpcPorts is immutable
@@ -169,7 +169,17 @@ spec:
                 type: object
               servers:
                 default: 3
+                description: |-
+                  Servers is the number of Raft control-plane servers. 3 or 5 give full
+                  Raft HA (survives 1 or 2 node failures respectively) and are recommended
+                  for production. 1 is a non-HA, single-node control plane for edge/dev
+                  deployments: on Kubernetes a failed control-plane pod is rescheduled by
+                  the StatefulSet controller, so the outage is bounded by the reschedule
+                  time rather than open-ended, but there is no Raft quorum to fail over to
+                  while the pod is down. Even counts are always rejected (split-brain
+                  safety).
                 enum:
+                - 1
                 - 3
                 - 5
                 format: int32

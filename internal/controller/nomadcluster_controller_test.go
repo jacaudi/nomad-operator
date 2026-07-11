@@ -33,6 +33,24 @@ func minimalCluster(name, ns string) *nomadv1alpha1.NomadCluster {
 	}
 }
 
+// singleServerCluster is a minimal single-node (non-HA) control plane fixture
+// for FR-1: servers=1 with exactly one rpcPort/TCPRoute.
+func singleServerCluster(name, ns string) *nomadv1alpha1.NomadCluster {
+	return &nomadv1alpha1.NomadCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: nomadv1alpha1.NomadClusterSpec{
+			Image:   "hashicorp/nomad:2.0.4",
+			Servers: 1,
+			Storage: nomadv1alpha1.StorageSpec{Size: "1Gi"},
+			TLS:     nomadv1alpha1.TLSSpec{CertSecretRef: "nomad-tls"},
+			Gateway: nomadv1alpha1.GatewaySpec{
+				Mode: nomadv1alpha1.GatewayModeManaged, ClassName: "cilium",
+				RPCPorts: []int32{14647}, HTTPHostname: "nomad.example.com",
+			},
+		},
+	}
+}
+
 var _ = Describe("NomadCluster reconcile skeleton", func() {
 	It("sets Pending phase and Reconciled condition", func() {
 		ctx := context.Background()
@@ -55,6 +73,23 @@ var _ = Describe("NomadCluster reconcile skeleton", func() {
 		Expect(k8s.Create(ctx, nc)).To(Succeed())
 		nc.Spec.Servers = 5
 		Expect(k8s.Update(ctx, nc)).NotTo(Succeed()) // CEL immutability
+	})
+
+	// FR-1: a single-node (non-HA) control plane is a user-approved tradeoff --
+	// on Kubernetes a failed control-plane pod is rescheduled, so the downtime
+	// from servers=1 is minimal and full Raft HA is not always required.
+	It("accepts a single-node (servers: 1) control plane with exactly one rpcPort", func() {
+		ctx := context.Background()
+		nc := singleServerCluster("single", "default")
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+	})
+
+	It("still rejects an even servers count (split-brain safety)", func() {
+		ctx := context.Background()
+		nc := minimalCluster("even", "default")
+		nc.Spec.Servers = 2
+		nc.Spec.Gateway.RPCPorts = []int32{14647, 24647}
+		Expect(k8s.Create(ctx, nc)).NotTo(Succeed())
 	})
 })
 
