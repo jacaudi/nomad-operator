@@ -88,3 +88,35 @@ Source: slice-2 whole-branch review, 2026-07-11.
   design change beyond the slice.
 - **Proposed fix:** return a typed verification result (reason enum + message) from
   `ensureExistingGateway` and surface it in the `GatewayReady` condition.
+
+---
+
+# Feature Requests
+
+## FR-1. Support a single-node (`servers: 1`) control plane
+
+- **Type:** Feature request · **Area:** CRD validation / topology · **Requested by:** user, 2026-07-11
+- **Current behavior:** `spec.servers` is `Enum=3;5` (immutable), so the minimum control
+  plane is 3 Raft servers across 3 nodes (hard `kubernetes.io/hostname` anti-affinity). A
+  single-node control plane cannot be expressed.
+- **Request:** allow `spec.servers: 1` for non-HA / edge / dev / small deployments.
+- **Rationale:** running on Kubernetes, a failed control-plane pod is rescheduled by the
+  StatefulSet controller, so the downtime from a single control-plane node is minimal — full
+  3-node Raft quorum HA is not always required. The operator should let the user opt into a
+  1-server control plane and accept the (small, reschedule-bounded) downtime tradeoff.
+- **Scope (small — the rest already scales with `servers`):**
+  - Relax the CEL enum `Enum=3;5` → `Enum=1;3;5` on `NomadClusterSpec.Servers` (keep it odd;
+    even counts remain disallowed for split-brain safety). Regenerate the CRD.
+  - No anti-affinity change needed: with 1 server there is a single pod, so hard
+    per-node anti-affinity is moot (it only constrains 2+ pods).
+  - `bootstrap_expect` already renders from `servers` (→ 1); a 1-server Raft bootstraps
+    immediately.
+  - `PDB minAvailable = servers - 1 = 0` already permits the single pod to be
+    rescheduled/drained (which is exactly the intended "minimal downtime via reschedule"
+    behavior) — no change required.
+  - `gateway.rpcPorts` length must equal `servers`, so a `servers: 1` cluster uses exactly
+    one RPC port / one per-server TCPRoute.
+- **Tradeoff to document:** `servers: 1` = NO Raft HA. A pod reschedule (node failure,
+  upgrade, eviction) is a brief control-plane outage; running workloads on edge clients keep
+  running, but new scheduling/API is unavailable until the server is back. Recommend `3`/`5`
+  for production HA; `1` for edge/dev/single-node.
