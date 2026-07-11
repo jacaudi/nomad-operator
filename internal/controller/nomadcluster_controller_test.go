@@ -5,9 +5,13 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
 )
@@ -60,4 +64,41 @@ func meta_IsStatusConditionTrue(conds []metav1.Condition, t string) bool {
 		}
 	}
 	return false
+}
+
+var _ = Describe("Managed provisioning", func() {
+	It("creates workloads and routes and reaches Bootstrapping when gateway+cert are ready", func() {
+		ctx := context.Background()
+		ns := "mgd"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, "nomad-tls", ns)
+		nc := minimalCluster("prod", ns)
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+
+		// Pre-create the Gateway with an assigned address (envtest runs no Gateway controller).
+		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+
+		// First reconcile creates the Gateway (no address yet) → Pending.
+		reconcileOnce(r, "prod", ns)
+		gwName := names(nc).Gateway
+		var gw gwapiv1.Gateway
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: gwName, Namespace: ns}, &gw)).To(Succeed())
+		gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: "10.0.0.5"}}
+		Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
+
+		// Second reconcile provisions workloads → Bootstrapping.
+		reconcileOnce(r, "prod", ns)
+
+		var ss appsv1.StatefulSet
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: names(nc).StatefulSet, Namespace: ns}, &ss)).To(Succeed())
+		Expect(ss.Spec.PodManagementPolicy).To(Equal(appsv1.ParallelPodManagement))
+		var tcp gwapiv1a2.TCPRoute
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "prod-rpc-0", Namespace: ns}, &tcp)).To(Succeed())
+	})
+})
+
+func reconcileOnce(r *NomadClusterReconciler, name, ns string) {
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})
+	Expect(err).NotTo(HaveOccurred())
 }

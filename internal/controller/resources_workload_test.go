@@ -1,6 +1,11 @@
 package controller
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+)
 
 func TestStatefulSetBootstrapKnobs(t *testing.T) {
 	nc := minimalCluster("prod", "nomad-system")
@@ -78,5 +83,54 @@ func TestBuildAPIServiceSelectsServerPods(t *testing.T) {
 	}
 	if len(svc.Spec.Ports) != 1 || svc.Spec.Ports[0].Port != portHTTP {
 		t.Errorf("APIService port = %+v, want single port %d", svc.Spec.Ports, portHTTP)
+	}
+}
+
+// TestReadinessProbeIsExec guards the B1 fix: verify_https_client=true requires
+// a client cert on every HTTPS request, which an httpGet probe cannot present.
+// The readiness probe must be an Exec probe that shells out to `nomad operator
+// api` (which reads NOMAD_CACERT/NOMAD_CLIENT_CERT/NOMAD_CLIENT_KEY) against
+// /v1/agent/health, never an HTTPGet probe.
+func TestReadinessProbeIsExec(t *testing.T) {
+	nc := minimalCluster("prod", "nomad-system")
+	ss := buildStatefulSet(nc, "abc123")
+	containers := ss.Spec.Template.Spec.Containers
+	var server *corev1.Container
+	for i := range containers {
+		if containers[i].Name == "nomad" {
+			server = &containers[i]
+		}
+	}
+	if server == nil {
+		t.Fatal("server container \"nomad\" not found")
+	}
+	probe := server.ReadinessProbe
+	if probe == nil {
+		t.Fatal("readiness probe missing")
+	}
+	if probe.HTTPGet != nil {
+		t.Error("readiness probe uses HTTPGet; verify_https_client=true breaks cert-less httpGet probes, must be Exec")
+	}
+	if probe.Exec == nil {
+		t.Fatal("readiness probe must use an Exec handler")
+	}
+	cmd := strings.Join(probe.Exec.Command, " ")
+	if !strings.Contains(cmd, "nomad operator api") {
+		t.Errorf("readiness probe exec command = %q, want it to invoke \"nomad operator api\"", cmd)
+	}
+	if !strings.Contains(cmd, "/v1/agent/health") {
+		t.Errorf("readiness probe exec command = %q, want it to target /v1/agent/health", cmd)
+	}
+}
+
+// TestInitEntrypointInjectsGossipKey guards the B2 fix: gossip encryption must
+// actually be enabled via the init container's overlay.hcl, reading the key
+// mounted from the gossip Secret at /nomad/gossip/key.
+func TestInitEntrypointInjectsGossipKey(t *testing.T) {
+	if !strings.Contains(initEntrypoint, "/nomad/gossip/key") {
+		t.Error("initEntrypoint does not read the gossip key from /nomad/gossip/key")
+	}
+	if !strings.Contains(initEntrypoint, "encrypt") {
+		t.Error("initEntrypoint does not inject the gossip encrypt key into the overlay HCL")
 	}
 }

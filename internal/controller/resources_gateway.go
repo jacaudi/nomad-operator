@@ -1,9 +1,11 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
@@ -102,4 +104,25 @@ func buildTCPRoutes(nc *nomadv1alpha1.NomadCluster) []*gwapiv1a2.TCPRoute {
 		})
 	}
 	return routes
+}
+
+// ensureManagedGateway applies the operator-owned Gateway and re-reads it to
+// observe the address assigned by the Gateway controller. envtest runs no
+// Gateway controller, so tests assign Status.Addresses directly to simulate it.
+func (r *NomadClusterReconciler) ensureManagedGateway(ctx context.Context, nc *nomadv1alpha1.NomadCluster) (string, bool, error) {
+	gw := buildManagedGateway(nc)
+	if err := r.apply(ctx, nc, gw); err != nil {
+		return "", false, err
+	}
+	// Re-read to observe the assigned address.
+	var current gwapiv1.Gateway
+	if err := r.Get(ctx, client.ObjectKeyFromObject(gw), &current); err != nil {
+		return "", false, err
+	}
+	for _, a := range current.Status.Addresses {
+		if a.Value != "" {
+			return a.Value, true, nil
+		}
+	}
+	return "", false, nil
 }
