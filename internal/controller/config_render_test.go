@@ -1,0 +1,30 @@
+package controller
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestRenderConfigDeterministicHash(t *testing.T) {
+	nc := minimalCluster("prod", "nomad-system")
+	hcl1, h1 := renderConfig(nc, "10.0.0.5")
+	hcl2, h2 := renderConfig(nc, "10.0.0.5")
+	if h1 != h2 {
+		t.Fatal("hash is not deterministic")
+	}
+	if !strings.Contains(hcl1, "bootstrap_expect = 3") {
+		t.Error("missing bootstrap_expect")
+	}
+	if !strings.Contains(hcl1, `verify_server_hostname = true`) {
+		t.Error("missing TLS verify")
+	}
+	if !strings.Contains(hcl1, `acl {`) {
+		t.Error("missing acl stanza")
+	}
+	// Address changes must change the hash (so the StatefulSet rolls).
+	_, h3 := renderConfig(nc, "10.0.0.9")
+	if h1 == h3 {
+		t.Error("hash unchanged when gateway address changed")
+	}
+	_ = hcl2
+}
