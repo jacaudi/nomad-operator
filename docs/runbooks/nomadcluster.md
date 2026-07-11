@@ -366,3 +366,36 @@ When a `NomadCluster` with `spec.gateway.mode: Existing` is stuck at
 Steps 1–3 fail *silently* from the operator's perspective (`ready=false`,
 no error, no differentiated condition reason) — the only way to tell them
 apart today is by inspecting the Gateway object directly as above.
+
+---
+
+## 7. Integration-test verification (Nomad node status set)
+
+The hermetic ACL integration test (`internal/nomad/client_write_integration_test.go`,
+`//go:build integration`) boots a real ACL-enabled `nomad agent -dev`, bootstraps ACLs
+with an operator-supplied token, and reads back the node set.
+
+**Verified 2026-07-11** against **Nomad v2.0.4** (revision `5b83b133998a`, the exact commit
+the `github.com/hashicorp/nomad/api` module is pinned to) running inside a Linux container:
+
+- `ACLTokens().BootstrapOpts(token)` echoes the supplied token back as the secret ID
+  (confirms the operator's idempotent Secret-first bootstrap contract).
+- An authenticated client (token from the bootstrap Secret) can `Ping` and `ListNodes`.
+- **Observed node status value: `ready`** — this closes Foundation open-item #1
+  (the `Node.Status` value set surfaced into `NomadNodeStatus` in slice 3 is `ready`,
+  plus `initializing`/`down`/`disconnected`/`draining` per the Nomad node lifecycle).
+
+Reproduce (requires Docker; the binary is Linux-only so it runs in a container):
+
+```bash
+# Build a golang image with the pinned nomad binary
+printf 'FROM golang:1.26\nCOPY --from=hashicorp/nomad:2.0.4 /bin/nomad /usr/local/bin/nomad\n' \
+  | docker build -t nomad-itest:local -f - .
+# Run the tagged integration tests (nomad -dev needs cgroup access)
+docker run --rm --privileged --cgroupns=host -v "$PWD":/src -w /src \
+  nomad-itest:local \
+  go test -tags integration ./internal/nomad/ -run TestACLBootstrapAndLeaderLive -v
+```
+
+On a host with a native `nomad` v2.0.4 binary on `PATH`, `make test-integration` runs the
+same test directly; without a `nomad` binary it skips cleanly.
