@@ -95,8 +95,8 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return r.finish(ctx, &nc, ctrl.Result{RequeueAfter: requeueShort})
 	}
 
-	// 2. Gateway (Managed only in this task; Existing added in Task 9).
-	gwAddr, gwReady, err := r.ensureManagedGateway(ctx, &nc)
+	// 2. Gateway: dispatches to Managed or Existing based on spec.gateway.mode.
+	gwAddr, gwReady, err := r.ensureGateway(ctx, &nc)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

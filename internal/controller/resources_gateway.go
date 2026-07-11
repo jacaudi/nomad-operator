@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
@@ -125,4 +127,83 @@ func (r *NomadClusterReconciler) ensureManagedGateway(ctx context.Context, nc *n
 		}
 	}
 	return "", false, nil
+}
+
+// ensureGateway dispatches to the Managed or Existing gateway path based on
+// spec.gateway.mode. Route application (buildTLSRoute/buildTCPRoutes) is
+// unchanged for both modes — parentGateway already resolves to the operator's
+// own Gateway (Managed) or the referenced one (Existing).
+func (r *NomadClusterReconciler) ensureGateway(ctx context.Context, nc *nomadv1alpha1.NomadCluster) (string, bool, error) {
+	if nc.Spec.Gateway.Mode == nomadv1alpha1.GatewayModeExisting {
+		return r.ensureExistingGateway(ctx, nc)
+	}
+	return r.ensureManagedGateway(ctx, nc)
+}
+
+// ensureExistingGateway verifies the user-owned Gateway referenced by
+// spec.gateway.ref: it must exist, carry a listener for the HTTP hostname and
+// one TCP listener per RPC port, and admit the CR's namespace via
+// allowedRoutes on those listeners. It never creates or mutates the Gateway —
+// the user owns it. Returns ready=false (never an error) for any of those
+// verification failures so the reconciler surfaces GatewayReady=False rather
+// than treating a misconfigured shared Gateway as a hard error.
+func (r *NomadClusterReconciler) ensureExistingGateway(ctx context.Context, nc *nomadv1alpha1.NomadCluster) (string, bool, error) {
+	ref := nc.Spec.Gateway.Ref
+	var gw gwapiv1.Gateway
+	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: ref.Namespace}, &gw); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	// Verify required listeners (HTTP hostname + each rpc port) exist and
+	// admit the CR's namespace.
+	haveHTTP := false
+	tcpPorts := map[int32]bool{}
+	for _, l := range gw.Spec.Listeners {
+		if !listenerAdmitsNamespace(l, gw.Namespace, nc.Namespace) {
+			continue
+		}
+		if l.Protocol == gwapiv1.TCPProtocolType {
+			tcpPorts[int32(l.Port)] = true
+		}
+		if l.Protocol == gwapiv1.TLSProtocolType && l.Hostname != nil && string(*l.Hostname) == nc.Spec.Gateway.HTTPHostname {
+			haveHTTP = true
+		}
+	}
+	if !haveHTTP {
+		return "", false, nil
+	}
+	for _, p := range nc.Spec.Gateway.RPCPorts {
+		if !tcpPorts[p] {
+			return "", false, nil
+		}
+	}
+	for _, a := range gw.Status.Addresses {
+		if a.Value != "" {
+			return a.Value, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// listenerAdmitsNamespace reports whether a Gateway listener's allowedRoutes
+// would admit a Route created in routeNS, given the Gateway's own namespace
+// gwNS. Only the Core support levels (All, Same) are evaluated;
+// Selector-based admission has no present caller and is treated as
+// not-admitted (fail closed) rather than requiring an extra Namespace lookup
+// with no concrete use case yet.
+func listenerAdmitsNamespace(l gwapiv1.Listener, gwNS, routeNS string) bool {
+	from := gwapiv1.NamespacesFromSame
+	if l.AllowedRoutes != nil && l.AllowedRoutes.Namespaces != nil && l.AllowedRoutes.Namespaces.From != nil {
+		from = *l.AllowedRoutes.Namespaces.From
+	}
+	switch from {
+	case gwapiv1.NamespacesFromAll:
+		return true
+	case gwapiv1.NamespacesFromSame:
+		return gwNS == routeNS
+	default:
+		return false
+	}
 }
