@@ -186,15 +186,12 @@ func (r *NomadClusterReconciler) clientFor(ctx context.Context, nc *nomadv1alpha
 }
 
 // bootstrapAndReady waits for quorum via the injected client, runs the
-// idempotent ACL bootstrap, and advances the cluster to Ready. gwAddr is
-// already persisted to nc.Status.GatewayAddress by the caller before this
-// runs, so the body below doesn't consume it directly; it's kept in the
-// signature to match this method's documented interface contract (task-8
-// brief), same as the ctx-retained-for-signature-uniformity convention in
-// internal/nomad/client.go.
-//
-//nolint:unparam // see doc comment above
-func (r *NomadClusterReconciler) bootstrapAndReady(ctx context.Context, nc *nomadv1alpha1.NomadCluster, gwAddr string) (ctrl.Result, error) {
+// idempotent ACL bootstrap, and advances the cluster to Ready. The gateway
+// address is already persisted to nc.Status.GatewayAddress by the caller
+// before this runs, so the body below doesn't consume it directly; the
+// parameter is kept (blank) to match this method's documented interface
+// contract (task-8 brief).
+func (r *NomadClusterReconciler) bootstrapAndReady(ctx context.Context, nc *nomadv1alpha1.NomadCluster, _ string) (ctrl.Result, error) {
 	ops, err := r.clientFor(ctx, nc)
 	if err != nil {
 		return ctrl.Result{}, err

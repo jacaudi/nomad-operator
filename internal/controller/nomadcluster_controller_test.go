@@ -66,6 +66,15 @@ func meta_IsStatusConditionTrue(conds []metav1.Condition, t string) bool {
 	return false
 }
 
+func meta_IsStatusConditionFalse(conds []metav1.Condition, t string) bool {
+	for _, c := range conds {
+		if c.Type == t {
+			return c.Status == metav1.ConditionFalse
+		}
+	}
+	return false
+}
+
 var _ = Describe("Managed provisioning", func() {
 	It("creates workloads and routes and reaches Ready when gateway+cert are ready and the fake reports a leader", func() {
 		ctx := context.Background()
@@ -108,6 +117,46 @@ var _ = Describe("Managed provisioning", func() {
 		// and reaches Ready (not just Bootstrapping).
 		Expect(afterSecond.Status.Phase).To(Equal(nomadv1alpha1.PhaseReady))
 	})
+
+	It("persists Bootstrapping (not Ready) and CondQuorumHealthy=False when the fake reports no leader", func() {
+		ctx := context.Background()
+		ns := "mgd-noleader"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, "nomad-tls", ns)
+		nc := minimalCluster("noleader", ns)
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+
+		// No leader reported: fakeNomad.Leader() returns an error when leader=="".
+		fake := &fakeNomad{}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+
+		// First reconcile creates the Gateway (no address yet) → Pending.
+		reconcileOnce(r, "noleader", ns)
+		gwName := names(nc).Gateway
+		var gw gwapiv1.Gateway
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: gwName, Namespace: ns}, &gw)).To(Succeed())
+		gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: "10.0.0.5"}}
+		Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
+
+		// Second reconcile provisions workloads and reaches bootstrapAndReady,
+		// where the no-leader branch must leave Phase at Bootstrapping and
+		// mark CondQuorumHealthy False (nomadcluster_controller.go ~197-211).
+		reconcileOnce(r, "noleader", ns)
+
+		var got nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "noleader", Namespace: ns}, &got)).To(Succeed())
+		Expect(got.Status.Phase).To(Equal(nomadv1alpha1.PhaseBootstrapping))
+		Expect(meta_IsStatusConditionFalse(got.Status.Conditions, nomadv1alpha1.CondQuorumHealthy)).To(BeTrue())
+	})
+
+	// Ready->Degraded (QuorumLost) on leader loss is NOT covered here: it is
+	// unreachable via the full Reconcile() path as currently written. See
+	// nomadcluster_controller.go:143 (Reconcile unconditionally sets
+	// nc.Status.Phase = PhaseBootstrapping immediately before calling
+	// bootstrapAndReady) vs. nomadcluster_controller.go:205 (bootstrapAndReady's
+	// `if nc.Status.Phase == PhaseReady` guard, which can therefore never be
+	// true). Filed as a finding in .superpowers/sdd/task-8-report.md rather than
+	// fixed here, per this fix task's "no production behavior change" scope.
 })
 
 func reconcileOnce(r *NomadClusterReconciler, name, ns string) {
