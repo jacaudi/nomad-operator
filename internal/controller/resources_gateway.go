@@ -156,26 +156,27 @@ func (r *NomadClusterReconciler) ensureExistingGateway(ctx context.Context, nc *
 		}
 		return "", false, err
 	}
-	// Verify required listeners (HTTP hostname + each rpc port) exist and
-	// admit the CR's namespace.
-	haveHTTP := false
-	tcpPorts := map[int32]bool{}
+	// Verify required listeners by NAME, not just port/protocol: the routes
+	// (buildTLSRoute, buildTCPRoutes) attach via a fixed parentRef.SectionName
+	// — listenerNameHTTP and listenerNameRPC(ordinal) — and Gateway API
+	// matches sectionName against the listener's literal Name. A same-port
+	// listener under a different name would pass a port-only check yet the
+	// real Gateway controller would reject the route, so verification must
+	// look up the exact name each route needs.
+	byName := make(map[gwapiv1.SectionName]gwapiv1.Listener, len(gw.Spec.Listeners))
 	for _, l := range gw.Spec.Listeners {
-		if !listenerAdmitsNamespace(l, gw.Namespace, nc.Namespace) {
-			continue
-		}
-		if l.Protocol == gwapiv1.TCPProtocolType {
-			tcpPorts[int32(l.Port)] = true
-		}
-		if l.Protocol == gwapiv1.TLSProtocolType && l.Hostname != nil && string(*l.Hostname) == nc.Spec.Gateway.HTTPHostname {
-			haveHTTP = true
-		}
+		byName[l.Name] = l
 	}
-	if !haveHTTP {
+	httpListener, ok := byName[listenerNameHTTP]
+	if !ok || httpListener.Protocol != gwapiv1.TLSProtocolType ||
+		httpListener.Hostname == nil || string(*httpListener.Hostname) != nc.Spec.Gateway.HTTPHostname ||
+		!listenerAdmitsNamespace(httpListener, gw.Namespace, nc.Namespace) {
 		return "", false, nil
 	}
-	for _, p := range nc.Spec.Gateway.RPCPorts {
-		if !tcpPorts[p] {
+	for ordinal, p := range nc.Spec.Gateway.RPCPorts {
+		l, ok := byName[gwapiv1.SectionName(listenerNameRPC(ordinal))]
+		if !ok || l.Protocol != gwapiv1.TCPProtocolType || int32(l.Port) != p ||
+			!listenerAdmitsNamespace(l, gw.Namespace, nc.Namespace) {
 			return "", false, nil
 		}
 	}

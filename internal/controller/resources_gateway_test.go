@@ -81,11 +81,12 @@ func TestTCPRoutesOnePerServer(t *testing.T) {
 	}
 }
 
-// sharedGatewayFixture builds a user-owned Gateway with an HTTP listener
-// (hostname "nomad.example.com", matching minimalCluster's default) plus one
-// TCP listener per given port, admitting routes from all namespaces. Used to
-// simulate a pre-existing Gateway the operator does not own (Existing mode).
-func sharedGatewayFixture(ns, name string, rpcPorts []int32) *gwapiv1.Gateway {
+// sharedGatewayFixture builds a user-owned Gateway named "shared-gw" with an
+// HTTP listener (hostname "nomad.example.com", matching minimalCluster's
+// default) plus one TCP listener per given port, admitting routes from all
+// namespaces. Used to simulate a pre-existing Gateway the operator does not
+// own (Existing mode).
+func sharedGatewayFixture(ns string, rpcPorts []int32) *gwapiv1.Gateway {
 	admitAll := &gwapiv1.AllowedRoutes{Namespaces: &gwapiv1.RouteNamespaces{From: new(gwapiv1.NamespacesFromAll)}}
 	listeners := make([]gwapiv1.Listener, 0, 1+len(rpcPorts))
 	listeners = append(listeners, gwapiv1.Listener{
@@ -105,7 +106,7 @@ func sharedGatewayFixture(ns, name string, rpcPorts []int32) *gwapiv1.Gateway {
 		})
 	}
 	return &gwapiv1.Gateway{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-gw", Namespace: ns},
 		Spec:       gwapiv1.GatewaySpec{GatewayClassName: "cilium", Listeners: listeners},
 	}
 }
@@ -117,7 +118,7 @@ var _ = Describe("Existing gateway mode", func() {
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
 		makeCertSecret(ctx, "nomad-tls", ns)
 		// Pre-create a shared Gateway with the required listeners + an address.
-		shared := sharedGatewayFixture(ns, "shared-gw", []int32{14647, 24647, 34647})
+		shared := sharedGatewayFixture(ns, []int32{14647, 24647, 34647})
 		Expect(k8s.Create(ctx, shared)).To(Succeed())
 		shared.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: "10.0.0.9"}}
 		Expect(k8s.Status().Update(ctx, shared)).To(Succeed())
@@ -147,10 +148,35 @@ var _ = Describe("Existing gateway mode", func() {
 		ns := "existbad"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
 		makeCertSecret(ctx, "nomad-tls", ns)
-		shared := sharedGatewayFixture(ns, "shared-gw", []int32{14647}) // missing 24647, 34647
+		shared := sharedGatewayFixture(ns, []int32{14647}) // missing 24647, 34647
 		Expect(k8s.Create(ctx, shared)).To(Succeed())
 		shared.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: "10.0.0.9"}}
 		Expect(k8s.Status().Update(ctx, shared)).To(Succeed())
+		nc := minimalCluster("prod", ns)
+		nc.Spec.Gateway = nomadv1alpha1.GatewaySpec{Mode: nomadv1alpha1.GatewayModeExisting, Ref: &nomadv1alpha1.GatewayRef{Name: "shared-gw", Namespace: ns}, RPCPorts: []int32{14647, 24647, 34647}, HTTPHostname: "nomad.example.com"}
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+		fake := &fakeNomad{}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+		reconcileOnce(r, "prod", ns)
+		var got nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "prod", Namespace: ns}, &got)).To(Succeed())
+		Expect(meta_IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.CondGatewayReady)).To(BeFalse())
+	})
+
+	It("sets GatewayReady=False when a listener has the right port but the wrong name", func() {
+		ctx := context.Background()
+		ns := "existwrongname"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, "nomad-tls", ns)
+		// Right ports/protocols throughout, but the ordinal-0 RPC listener is
+		// named "custom-rpc-0" instead of the operator's "rpc-0" convention
+		// that buildTCPRoutes' parentRef.SectionName actually attaches to.
+		shared := sharedGatewayFixture(ns, []int32{14647, 24647, 34647})
+		shared.Spec.Listeners[1].Name = "custom-rpc-0"
+		Expect(k8s.Create(ctx, shared)).To(Succeed())
+		shared.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: "10.0.0.9"}}
+		Expect(k8s.Status().Update(ctx, shared)).To(Succeed())
+
 		nc := minimalCluster("prod", ns)
 		nc.Spec.Gateway = nomadv1alpha1.GatewaySpec{Mode: nomadv1alpha1.GatewayModeExisting, Ref: &nomadv1alpha1.GatewayRef{Name: "shared-gw", Namespace: ns}, RPCPorts: []int32{14647, 24647, 34647}, HTTPHostname: "nomad.example.com"}
 		Expect(k8s.Create(ctx, nc)).To(Succeed())
@@ -179,7 +205,7 @@ var _ = Describe("Existing gateway mode", func() {
 		// Same fixture shape as sharedGatewayFixture, but AllowedRoutes left at
 		// the Core default (From: Same) instead of admitting all namespaces —
 		// so a CR living in a different namespace than the Gateway is refused.
-		shared := sharedGatewayFixture(gwNs, "shared-gw", []int32{14647, 24647, 34647})
+		shared := sharedGatewayFixture(gwNs, []int32{14647, 24647, 34647})
 		sameOnly := &gwapiv1.RouteNamespaces{From: new(gwapiv1.NamespacesFromSame)}
 		for i := range shared.Spec.Listeners {
 			shared.Spec.Listeners[i].AllowedRoutes = &gwapiv1.AllowedRoutes{Namespaces: sameOnly}
