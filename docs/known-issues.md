@@ -120,3 +120,19 @@ Source: slice-2 whole-branch review, 2026-07-11.
   upgrade, eviction) is a brief control-plane outage; running workloads on edge clients keep
   running, but new scheduling/API is unavailable until the server is back. Recommend `3`/`5`
   for production HA; `1` for edge/dev/single-node.
+
+## 7. Existing mode: operator does not watch the referenced Gateway
+
+- **Severity:** Minor · **Area:** reconciler / Existing-mode gateway · **Found:** local single-node e2e test, 2026-07-11
+- **Location:** `internal/controller/nomadcluster_controller.go` `SetupWithManager` (watch set) +
+  `ensureExistingGateway` in `internal/controller/resources_gateway.go`
+- **Problem:** in `gateway.mode: Existing`, the operator reads the referenced Gateway's
+  `status.addresses` but does not set up a Watch on that Gateway. If the user's Gateway gets
+  its address assigned (or changed) AFTER the operator's reconcile, the operator won't react
+  until its periodic resync or the next NomadCluster change — so the cluster can sit at
+  `Pending`/stale `gatewayAddress` longer than necessary. Observed directly: patching the
+  Gateway's `status.addresses` did not trigger a reconcile; a manual CR annotation was needed.
+- **Proposed fix:** add a `Watches` on `gatewayapi.Gateway` in `SetupWithManager` mapping the
+  referenced Gateway back to the owning NomadCluster(s) (Existing mode), OR watch the operator's
+  own Routes on that Gateway. Managed mode is unaffected (the operator owns and watches its
+  Gateway via ownerRef).
