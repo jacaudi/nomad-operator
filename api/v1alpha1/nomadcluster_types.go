@@ -1,0 +1,191 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1alpha1
+
+import (
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
+// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+
+// GatewayMode describes how the Gateway API resources for a NomadCluster are provisioned.
+type GatewayMode string
+
+const (
+	// GatewayModeManaged means the controller creates and owns the Gateway.
+	GatewayModeManaged GatewayMode = "Managed"
+	// GatewayModeExisting means the controller attaches routes to a pre-existing Gateway.
+	GatewayModeExisting GatewayMode = "Existing"
+)
+
+// Phase values for NomadClusterStatus.Phase.
+const (
+	PhasePending       = "Pending"
+	PhaseBootstrapping = "Bootstrapping"
+	PhaseReady         = "Ready"
+	PhaseDegraded      = "Degraded"
+)
+
+// Condition types.
+const (
+	CondReconciled      = "Reconciled"
+	CondGatewayReady    = "GatewayReady"
+	CondQuorumHealthy   = "QuorumHealthy"
+	CondACLBootstrapped = "ACLBootstrapped"
+	CondReady           = "Ready"
+)
+
+// StorageSpec configures the persistent volume claims for Nomad server data.
+type StorageSpec struct {
+	// +kubebuilder:validation:Required
+	Size string `json:"size"`
+	// +optional
+	StorageClassName string `json:"storageClassName,omitempty"`
+}
+
+// TLSSpec configures the TLS material used for Nomad's RPC/HTTP listeners.
+type TLSSpec struct {
+	// CertSecretRef names a cert-manager-issued Secret (tls.crt, tls.key, ca.crt).
+	// SANs must include server.<region>.nomad, client.<region>.nomad,
+	// spec.gateway.httpHostname, localhost, and 127.0.0.1.
+	// +kubebuilder:validation:Required
+	CertSecretRef string `json:"certSecretRef"`
+}
+
+// GatewayRef identifies a pre-existing Gateway API Gateway to attach routes to.
+type GatewayRef struct {
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+	// +kubebuilder:validation:Required
+	Namespace string `json:"namespace"`
+}
+
+// GatewaySpec configures the Gateway API resources fronting a NomadCluster.
+//
+// +kubebuilder:validation:XValidation:rule="self.mode != 'Managed' || has(self.className)",message="className is required when mode is Managed"
+// +kubebuilder:validation:XValidation:rule="self.mode != 'Existing' || has(self.ref)",message="ref is required when mode is Existing"
+type GatewaySpec struct {
+	// +kubebuilder:validation:Enum=Managed;Existing
+	// +kubebuilder:default=Managed
+	Mode GatewayMode `json:"mode,omitempty"`
+	// +optional
+	ClassName string `json:"className,omitempty"`
+	// +optional
+	Ref *GatewayRef `json:"ref,omitempty"`
+	// RPCPorts is one L4 listener port per server; length must equal spec.servers.
+	// +kubebuilder:validation:MinItems=3
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="rpcPorts is immutable"
+	RPCPorts []int32 `json:"rpcPorts"`
+	// +kubebuilder:validation:Required
+	HTTPHostname string `json:"httpHostname"`
+}
+
+// NomadClusterSpec defines the desired state of NomadCluster
+//
+// +kubebuilder:validation:XValidation:rule="size(self.gateway.rpcPorts) == self.servers",message="gateway.rpcPorts length must equal servers"
+type NomadClusterSpec struct {
+	// +kubebuilder:validation:Required
+	Image string `json:"image"`
+	// +kubebuilder:validation:Enum=3;5
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="servers is immutable"
+	Servers int32 `json:"servers,omitempty"`
+	// +kubebuilder:default=global
+	Region string `json:"region,omitempty"`
+	// +kubebuilder:default={"dc1"}
+	Datacenters []string `json:"datacenters,omitempty"`
+	// +kubebuilder:validation:Required
+	Storage StorageSpec `json:"storage"`
+	// +kubebuilder:validation:Required
+	TLS TLSSpec `json:"tls"`
+	// +kubebuilder:validation:Required
+	Gateway GatewaySpec `json:"gateway"`
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// MemberStatus reports the observed state of a single Nomad server member.
+type MemberStatus struct {
+	Name   string `json:"name"`
+	Addr   string `json:"addr"`
+	Status string `json:"status"`
+	Leader bool   `json:"leader"`
+}
+
+// NomadClusterStatus defines the observed state of NomadCluster.
+type NomadClusterStatus struct {
+	// +optional
+	Phase string `json:"phase,omitempty"`
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// +optional
+	GatewayAddress string `json:"gatewayAddress,omitempty"`
+	// +optional
+	Members []MemberStatus `json:"members,omitempty"`
+	// +optional
+	Leader string `json:"leader,omitempty"`
+	// +optional
+	Quorum string `json:"quorum,omitempty"`
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+	// +optional
+	BootstrapTokenSecretRef string `json:"bootstrapTokenSecretRef,omitempty"`
+	// +optional
+	GossipKeySecretRef string `json:"gossipKeySecretRef,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Quorum",type=string,JSONPath=`.status.quorum`
+// +kubebuilder:printcolumn:name="Leader",type=string,JSONPath=`.status.leader`
+
+// NomadCluster is the Schema for the nomadclusters API
+type NomadCluster struct {
+	metav1.TypeMeta `json:",inline"`
+
+	// metadata is a standard object metadata
+	// +optional
+	metav1.ObjectMeta `json:"metadata,omitzero"`
+
+	// spec defines the desired state of NomadCluster
+	// +required
+	Spec NomadClusterSpec `json:"spec"`
+
+	// status defines the observed state of NomadCluster
+	// +optional
+	Status NomadClusterStatus `json:"status,omitzero"`
+}
+
+// +kubebuilder:object:root=true
+
+// NomadClusterList contains a list of NomadCluster
+type NomadClusterList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitzero"`
+	Items           []NomadCluster `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(&NomadCluster{}, &NomadClusterList{})
+}
