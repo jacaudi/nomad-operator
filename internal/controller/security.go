@@ -35,12 +35,12 @@ func (r *NomadClusterReconciler) ensureGossipKey(ctx context.Context, nc *nomadv
 	if _, err := rand.Read(buf); err != nil {
 		return "", fmt.Errorf("gossip key rand: %w", err)
 	}
+	// No controller ref: the gossip key is retained-by-design on CR delete (it
+	// and the token Secret and Raft PVCs survive the ownerRef cascade so an
+	// operator can recreate the CR without losing gossip encryption or data).
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: n.GossipSecret, Namespace: nc.Namespace, Labels: n.Labels()},
 		Data:       map[string][]byte{"key": []byte(base64.StdEncoding.EncodeToString(buf))},
-	}
-	if err := controllerutil.SetControllerReference(nc, sec, r.Scheme); err != nil {
-		return "", err
 	}
 	if err := r.Create(ctx, sec); err != nil && !apierrors.IsAlreadyExists(err) {
 		return "", err
@@ -101,12 +101,11 @@ func (r *NomadClusterReconciler) ensureBootstrapToken(ctx context.Context, nc *n
 	if err != nil {
 		return err
 	}
+	// No controller ref: the token Secret is retained-by-design on CR delete
+	// (see ensureGossipKey) so the ACL bootstrap token survives CR deletion.
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: n.TokenSecret, Namespace: nc.Namespace, Labels: n.Labels()},
 		Data:       map[string][]byte{"token": []byte(token)},
-	}
-	if err := controllerutil.SetControllerReference(nc, sec, r.Scheme); err != nil {
-		return err
 	}
 	if err := r.Create(ctx, sec); err != nil {
 		return fmt.Errorf("write token secret: %w", err)

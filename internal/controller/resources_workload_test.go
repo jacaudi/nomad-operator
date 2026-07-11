@@ -123,6 +123,32 @@ func TestReadinessProbeIsExec(t *testing.T) {
 	}
 }
 
+// TestStatefulSetRollingAndReadiness locks two design guarantees for rolling
+// updates: the StatefulSet uses RollingUpdate (not OnDelete), and the
+// readiness/liveness split is Raft-gated exec readiness + process-level TCP
+// liveness (never leader-gated), so a rollout only proceeds pod-by-pod once
+// each replaced pod has rejoined Raft.
+func TestStatefulSetRollingAndReadiness(t *testing.T) {
+	nc := minimalCluster("prod", "nomad-system")
+	ss := buildStatefulSet(nc, "h")
+	if ss.Spec.UpdateStrategy.Type != "RollingUpdate" {
+		t.Errorf("updateStrategy = %q, want RollingUpdate", ss.Spec.UpdateStrategy.Type)
+	}
+	c := ss.Spec.Template.Spec.Containers[0]
+	// Readiness is an exec probe (verify_https_client=true breaks httpGet probes).
+	if c.ReadinessProbe == nil || c.ReadinessProbe.Exec == nil ||
+		len(c.ReadinessProbe.Exec.Command) < 3 || c.ReadinessProbe.Exec.Command[0] != "nomad" {
+		t.Error("readiness must be an exec `nomad operator api` health check")
+	}
+	if c.ReadinessProbe.HTTPGet != nil {
+		t.Error("readiness must NOT be an httpGet probe (cannot present a client cert)")
+	}
+	// Liveness is process-level (TCP), NOT leader-gated.
+	if c.LivenessProbe == nil || c.LivenessProbe.TCPSocket == nil || c.LivenessProbe.Exec != nil {
+		t.Error("liveness must be a process-level TCP probe")
+	}
+}
+
 // TestInitEntrypointInjectsGossipKey guards the B2 fix: gossip encryption must
 // actually be enabled via the init container's overlay.hcl, reading the key
 // mounted from the gossip Secret at /nomad/gossip/key.

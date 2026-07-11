@@ -102,3 +102,23 @@ var _ = Describe("ACL bootstrap idempotency", func() {
 		Expect(fake.bootstrapped).To(BeFalse()) // gated on Secret, not condition
 	})
 })
+
+var _ = Describe("teardown retention", func() {
+	It("does not own the token/gossip secrets (retained on delete)", func() {
+		ctx := context.Background()
+		ns := "teardown"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, "nomad-tls", ns)
+		nc := minimalCluster("prod", ns)
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+		_, _ = r.ensureGossipKey(ctx, nc)
+		_ = r.ensureBootstrapToken(ctx, nc, fake)
+		var g, tk corev1.Secret
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: names(nc).GossipSecret, Namespace: ns}, &g)).To(Succeed())
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: names(nc).TokenSecret, Namespace: ns}, &tk)).To(Succeed())
+		Expect(g.OwnerReferences).To(BeEmpty())
+		Expect(tk.OwnerReferences).To(BeEmpty())
+	})
+})
