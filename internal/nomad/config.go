@@ -17,11 +17,18 @@ type Config struct {
 }
 
 // TLSConfig holds optional TLS material for talking to Nomad over HTTPS.
+// Both path-based and PEM-byte fields are supported: the CLI/dev path reads
+// files from disk, while the operator holds PEM bytes read from a Kubernetes
+// Secret and has no file to point at.
 type TLSConfig struct {
 	CACert     string // path to CA cert file
 	ClientCert string // path to client cert file
 	ClientKey  string // path to client key file
 	Insecure   bool
+
+	CACertPEM     []byte // PEM-encoded CA cert
+	ClientCertPEM []byte // PEM-encoded client cert
+	ClientKeyPEM  []byte // PEM-encoded client key
 }
 
 // Validate reports whether the Config can be used to build a Client.
@@ -33,4 +40,13 @@ func (c Config) Validate() error {
 		return errors.New("nomad: ClientCert and ClientKey must be set together")
 	}
 	return nil
+}
+
+// hasTLSMaterial reports whether any TLS field is set. TLSConfig is not
+// comparable via == (it holds []byte fields), so this replaces a zero-value
+// struct comparison with an explicit per-field check.
+func (c Config) hasTLSMaterial() bool {
+	return c.TLSServerName != "" ||
+		c.TLS.CACert != "" || c.TLS.ClientCert != "" || c.TLS.ClientKey != "" || c.TLS.Insecure ||
+		len(c.TLS.CACertPEM) > 0 || len(c.TLS.ClientCertPEM) > 0 || len(c.TLS.ClientKeyPEM) > 0
 }

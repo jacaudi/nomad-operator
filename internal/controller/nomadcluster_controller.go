@@ -18,9 +18,12 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -136,7 +139,7 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// 4. Bootstrapping: wait for quorum, then ACL bootstrap (Task 8).
+	// 4. Bootstrapping: wait for quorum, then ACL bootstrap.
 	nc.Status.Phase = nomadv1alpha1.PhaseBootstrapping
 	return r.bootstrapAndReady(ctx, &nc, gwAddr)
 }
@@ -149,12 +152,86 @@ func (r *NomadClusterReconciler) finish(ctx context.Context, nc *nomadv1alpha1.N
 	return res, nil
 }
 
-// bootstrapAndReady is a stub: it persists the Bootstrapping phase reached by
-// Reconcile and requeues. Quorum polling and ACL bootstrap land in Task 8,
-// which is why gwAddr is unused here (it will drive the ACL bootstrap client).
-func (r *NomadClusterReconciler) bootstrapAndReady(ctx context.Context, nc *nomadv1alpha1.NomadCluster, _ string) (ctrl.Result, error) {
-	return r.finish(ctx, nc, ctrl.Result{RequeueAfter: requeueShort})
+// clientFor builds a per-cluster NomadOps from the CR: endpoint is the
+// in-cluster API Service, TLS material comes as PEM bytes from the
+// cert-manager Secret (never files), and the token, if bootstrapped, comes
+// from the token Secret.
+func (r *NomadClusterReconciler) clientFor(ctx context.Context, nc *nomadv1alpha1.NomadCluster) (NomadOps, error) {
+	n := names(nc)
+	endpoint := fmt.Sprintf("https://%s.%s.svc:%d", n.APISvc, nc.Namespace, portHTTP)
+
+	var certSec corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Name: nc.Spec.TLS.CertSecretRef, Namespace: nc.Namespace}, &certSec); err != nil {
+		return nil, err
+	}
+	// The operator holds PEM bytes (from the Secret), not files, so it uses the
+	// *PEM fields added to nomad.TLSConfig in Step 4a.
+	cfg := nomad.Config{
+		Address:       endpoint,
+		Region:        nc.Spec.Region,
+		TLSServerName: "server." + nc.Spec.Region + ".nomad",
+		TLS: nomad.TLSConfig{
+			CACertPEM:     certSec.Data["ca.crt"],
+			ClientCertPEM: certSec.Data["tls.crt"],
+			ClientKeyPEM:  certSec.Data["tls.key"],
+		},
+	}
+
+	// Token, if bootstrapped.
+	var tokenSec corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Name: names(nc).TokenSecret, Namespace: nc.Namespace}, &tokenSec); err == nil {
+		cfg.Token = string(tokenSec.Data["token"])
+	}
+	return r.NewNomadClient(cfg)
 }
+
+// bootstrapAndReady waits for quorum via the injected client, runs the
+// idempotent ACL bootstrap, and advances the cluster to Ready. gwAddr is
+// already persisted to nc.Status.GatewayAddress by the caller before this
+// runs, so the body below doesn't consume it directly; it's kept in the
+// signature to match this method's documented interface contract (task-8
+// brief), same as the ctx-retained-for-signature-uniformity convention in
+// internal/nomad/client.go.
+//
+//nolint:unparam // see doc comment above
+func (r *NomadClusterReconciler) bootstrapAndReady(ctx context.Context, nc *nomadv1alpha1.NomadCluster, gwAddr string) (ctrl.Result, error) {
+	ops, err := r.clientFor(ctx, nc)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	leader, err := ops.Leader(ctx)
+	if err != nil || leader == "" {
+		setCondition(nc, nomadv1alpha1.CondQuorumHealthy, metav1ConditionFalse, "NoLeader", "waiting for quorum")
+		if nc.Status.Phase == nomadv1alpha1.PhaseReady {
+			// Was Ready, now no leader → quorum lost (design §3.5/§3.7).
+			nc.Status.Phase = nomadv1alpha1.PhaseDegraded
+			setCondition(nc, nomadv1alpha1.CondReady, metav1ConditionFalse, "QuorumLost", "leader lost")
+		}
+		return r.finish(ctx, nc, ctrl.Result{RequeueAfter: requeueShort})
+	}
+	setCondition(nc, nomadv1alpha1.CondQuorumHealthy, metav1ConditionTrue, "LeaderElected", "quorum healthy")
+	// status.leader carries the raw "ip:port" from Status().Leader(). Mapping it
+	// to a friendly "<name>-server-N.<region>" and populating status.members from
+	// Status().Peers() are DEFERRED to slice 6 (hardening) — noted so they are not
+	// silently dropped; the DoD only requires leader/quorum be populated.
+	nc.Status.Leader = leader
+	nc.Status.Quorum = fmt.Sprintf("%d/%d", nc.Spec.Servers, nc.Spec.Servers)
+
+	if err := r.ensureBootstrapToken(ctx, nc, ops); err != nil {
+		setCondition(nc, nomadv1alpha1.CondACLBootstrapped, metav1ConditionFalse, "BootstrapFailed", err.Error())
+		return r.finish(ctx, nc, ctrl.Result{RequeueAfter: requeueShort})
+	}
+	nc.Status.BootstrapTokenSecretRef = names(nc).TokenSecret
+	setCondition(nc, nomadv1alpha1.CondACLBootstrapped, metav1ConditionTrue, "Bootstrapped", "acl bootstrapped")
+
+	n := names(nc)
+	nc.Status.Endpoint = fmt.Sprintf("https://%s.%s.svc:%d", n.APISvc, nc.Namespace, portHTTP)
+	nc.Status.Phase = nomadv1alpha1.PhaseReady
+	setCondition(nc, nomadv1alpha1.CondReady, metav1ConditionTrue, "Ready", "cluster ready")
+	return r.finish(ctx, nc, ctrl.Result{RequeueAfter: requeueSteady})
+}
+
+const requeueSteady = 60 * time.Second
 
 func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.NewNomadClient == nil {

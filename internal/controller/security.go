@@ -67,6 +67,59 @@ func (r *NomadClusterReconciler) certSecretReady(ctx context.Context, nc *nomadv
 	return true, nil
 }
 
+// newBootstrapToken mints a version-4 UUID string via crypto/rand, in the
+// shape Nomad's ACLTokens().BootstrapOpts expects for an operator-supplied
+// bootstrap token. This is a small hand-rolled helper rather than a
+// github.com/google/uuid import: uuid is currently only an indirect
+// dependency of this module, and minting a token here doesn't warrant
+// promoting it to direct.
+func newBootstrapToken() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("bootstrap token rand: %w", err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC-4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+// ensureBootstrapToken is idempotent: if the token Secret already exists, it is
+// the source of truth and no bootstrap is attempted. Otherwise it generates a
+// token, WRITES THE SECRET FIRST, then calls BootstrapOpts with that token.
+func (r *NomadClusterReconciler) ensureBootstrapToken(ctx context.Context, nc *nomadv1alpha1.NomadCluster, ops NomadOps) error {
+	n := names(nc)
+	var existing corev1.Secret
+	err := r.Get(ctx, types.NamespacedName{Name: n.TokenSecret, Namespace: nc.Namespace}, &existing)
+	if err == nil {
+		return nil // Secret is the source of truth; already bootstrapped
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	token, err := newBootstrapToken()
+	if err != nil {
+		return err
+	}
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: n.TokenSecret, Namespace: nc.Namespace, Labels: n.Labels()},
+		Data:       map[string][]byte{"token": []byte(token)},
+	}
+	if err := controllerutil.SetControllerReference(nc, sec, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, sec); err != nil {
+		return fmt.Errorf("write token secret: %w", err)
+	}
+
+	if _, err := ops.ACLBootstrap(ctx, token); err != nil {
+		// "already bootstrapped" out of band: the Secret we just wrote is
+		// authoritative for OUR token; surface but do not delete the Secret.
+		return fmt.Errorf("acl bootstrap: %w", err)
+	}
+	return nil
+}
+
 // apply sets the controller ref and Server-Side-Applies the object. SSA is used
 // instead of Get+Update because a naive update sends empty apiserver-populated
 // immutable fields (notably Service.clusterIP) and is rejected on the second

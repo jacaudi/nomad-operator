@@ -7,8 +7,9 @@ import (
 	"github.com/hashicorp/nomad/api"
 )
 
-// Client is a thin, read-oriented wrapper over the Nomad API client for a
-// single endpoint. Foundation exposes reads only; writes arrive in later slices.
+// Client is a thin wrapper over the Nomad API client for a single endpoint.
+// It exposes reads (nodes, agent health, leader) and a small write surface
+// (ACL bootstrap) needed by the operator's reconcile loop.
 type Client struct {
 	api *api.Client
 }
@@ -25,13 +26,16 @@ func New(cfg Config) (*Client, error) {
 		Region:   cfg.Region,
 		SecretID: cfg.Token,
 	}
-	if cfg.TLS != (TLSConfig{}) || cfg.TLSServerName != "" {
+	if cfg.hasTLSMaterial() {
 		apiCfg.TLSConfig = &api.TLSConfig{
 			CACert:        cfg.TLS.CACert,
 			ClientCert:    cfg.TLS.ClientCert,
 			ClientKey:     cfg.TLS.ClientKey,
 			Insecure:      cfg.TLS.Insecure,
 			TLSServerName: cfg.TLSServerName,
+			CACertPEM:     cfg.TLS.CACertPEM,
+			ClientCertPEM: cfg.TLS.ClientCertPEM,
+			ClientKeyPEM:  cfg.TLS.ClientKeyPEM,
 		}
 	}
 	c, err := api.NewClient(apiCfg)

@@ -67,7 +67,7 @@ func meta_IsStatusConditionTrue(conds []metav1.Condition, t string) bool {
 }
 
 var _ = Describe("Managed provisioning", func() {
-	It("creates workloads and routes and reaches Bootstrapping when gateway+cert are ready", func() {
+	It("creates workloads and routes and reaches Ready when gateway+cert are ready and the fake reports a leader", func() {
 		ctx := context.Background()
 		ns := "mgd"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
@@ -103,7 +103,10 @@ var _ = Describe("Managed provisioning", func() {
 
 		var afterSecond nomadv1alpha1.NomadCluster
 		Expect(k8s.Get(ctx, types.NamespacedName{Name: "prod", Namespace: ns}, &afterSecond)).To(Succeed())
-		Expect(afterSecond.Status.Phase).To(Equal(nomadv1alpha1.PhaseBootstrapping))
+		// Task 8: the fake reports a leader and bootstraps ACLs successfully, so
+		// the same reconcile that provisions workloads also completes bootstrap
+		// and reaches Ready (not just Bootstrapping).
+		Expect(afterSecond.Status.Phase).To(Equal(nomadv1alpha1.PhaseReady))
 	})
 })
 
