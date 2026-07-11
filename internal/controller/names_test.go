@@ -23,4 +23,13 @@ func TestNamesDeterministic(t *testing.T) {
 	if n.Labels()["app.kubernetes.io/instance"] != "prod" {
 		t.Errorf("labels missing instance")
 	}
+	if n.TLSRoute != "prod-nomad-tls" {
+		t.Errorf("TLSRoute = %q, want %q", n.TLSRoute, "prod-nomad-tls")
+	}
+	if n.TCPRoute(0) != "prod-rpc-0" {
+		t.Errorf("TCPRoute(0) = %q, want %q", n.TCPRoute(0), "prod-rpc-0")
+	}
+	if n.TCPRoute(2) != "prod-rpc-2" {
+		t.Errorf("TCPRoute(2) = %q, want %q", n.TCPRoute(2), "prod-rpc-2")
+	}
 }

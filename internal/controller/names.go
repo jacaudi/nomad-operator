@@ -20,20 +20,23 @@ type resourceNames struct {
 	Gateway      string
 	GossipSecret string
 	TokenSecret  string
+	TLSRoute     string
 }
 
 func names(nc *nomadv1alpha1.NomadCluster) resourceNames {
 	base := nc.Name + "-server"
+	apiSvc := nc.Name + "-nomad"
 	return resourceNames{
 		nc:           nc,
 		StatefulSet:  base,
 		HeadlessSvc:  base + "-headless",
-		APISvc:       nc.Name + "-nomad",
+		APISvc:       apiSvc,
 		ConfigMap:    base + "-config",
 		PDB:          base + "-pdb",
 		Gateway:      nc.Name + "-gateway",
 		GossipSecret: nc.Name + "-nomad-gossip-key",
 		TokenSecret:  nc.Name + "-nomad-bootstrap-token",
+		TLSRoute:     apiSvc + "-tls",
 	}
 }
 
@@ -42,6 +45,9 @@ func (r resourceNames) PodName(ordinal int) string {
 }
 func (r resourceNames) PodSvc(ordinal int) string {
 	return fmt.Sprintf("%s-%d-rpc", r.StatefulSet, ordinal)
+}
+func (r resourceNames) TCPRoute(ordinal int) string {
+	return fmt.Sprintf("%s-rpc-%d", r.nc.Name, ordinal)
 }
 
 func (r resourceNames) Labels() map[string]string {

@@ -71,7 +71,7 @@ func buildTLSRoute(nc *nomadv1alpha1.NomadCluster) *gwapiv1a2.TLSRoute {
 	parent := parentGateway(nc)
 	parent.SectionName = new(gwapiv1.SectionName(listenerNameHTTP))
 	return &gwapiv1a2.TLSRoute{
-		ObjectMeta: metav1.ObjectMeta{Name: n.APISvc + "-tls", Namespace: nc.Namespace, Labels: n.Labels()},
+		ObjectMeta: metav1.ObjectMeta{Name: n.TLSRoute, Namespace: nc.Namespace, Labels: n.Labels()},
 		Spec: gwapiv1a2.TLSRouteSpec{
 			CommonRouteSpec: gwapiv1.CommonRouteSpec{ParentRefs: []gwapiv1.ParentReference{parent}},
 			Hostnames:       []gwapiv1.Hostname{gwapiv1.Hostname(nc.Spec.Gateway.HTTPHostname)},
@@ -92,7 +92,7 @@ func buildTCPRoutes(nc *nomadv1alpha1.NomadCluster) []*gwapiv1a2.TCPRoute {
 		parent := parentGateway(nc)
 		parent.SectionName = new(gwapiv1.SectionName(listenerNameRPC(ordinal)))
 		routes = append(routes, &gwapiv1a2.TCPRoute{
-			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("%s-rpc-%d", nc.Name, ordinal), Namespace: nc.Namespace, Labels: n.Labels()},
+			ObjectMeta: metav1.ObjectMeta{Name: n.TCPRoute(ordinal), Namespace: nc.Namespace, Labels: n.Labels()},
 			Spec: gwapiv1a2.TCPRouteSpec{
 				CommonRouteSpec: gwapiv1.CommonRouteSpec{ParentRefs: []gwapiv1.ParentReference{parent}},
 				Rules: []gwapiv1a2.TCPRouteRule{{BackendRefs: []gwapiv1.BackendRef{{
