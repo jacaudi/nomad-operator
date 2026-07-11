@@ -276,4 +276,4 @@ verify: ## Build, vet, and test everything (the build gate).
 
 .PHONY: test-integration
 test-integration: ## Run hermetic Nomad integration tests (requires a nomad v2.0.4 binary in PATH; may need elevated privileges on Linux).
-	go test -tags integration ./internal/nomad/... -run TestDevAgent -v
+	go test -tags integration ./internal/nomad/... -run 'TestDevAgent|TestACLBootstrapAndLeaderLive' -v
