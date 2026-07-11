@@ -338,10 +338,16 @@ No custom upgrade controller. Quorum safety is delegated to Kubernetes primitive
 - **StatefulSet `RollingUpdate`** — ordered, one pod replaced at a time.
 - **PodDisruptionBudget `minAvailable = servers - 1`** (2 of 3) — voluntary disruptions never take a
   second server.
-- **Raft-aware readiness probe** — the pod reports Ready only when the server has rejoined and a
-  leader is known (`GET /v1/agent/health?type=server` is healthy ⇔ leader known). Because the
-  StatefulSet waits for pod *N* to be Ready before touching pod *N+1*, K8s never removes a second
-  server until the first is healthy again.
+- **Raft-aware readiness probe — an `exec` probe, not `httpGet`.** The pod reports Ready only when
+  the server has rejoined and a leader is known (`/v1/agent/health?type=server` is healthy ⇔ leader
+  known). But `verify_https_client = true` (§3.3) requires a **client certificate on every HTTPS
+  request**, and a Kubernetes `httpGet` probe cannot present one — Nomad's own docs warn that
+  `verify_https_client` "may break … HTTPS health checks." So readiness is an **`exec` probe** that
+  runs `nomad operator api /v1/agent/health?type=server` inside the pod with `NOMAD_ADDR=https://127.0.0.1:4646`
+  and `NOMAD_CACERT`/`NOMAD_CLIENT_CERT`/`NOMAD_CLIENT_KEY` pointing at the mounted cert (the
+  `127.0.0.1`/`localhost` SANs required in §3.3 exist for exactly this in-pod path); a non-zero exit
+  (e.g. HTTP 500 "no leader") means not-Ready. Because the StatefulSet waits for pod *N* to be Ready
+  before touching pod *N+1*, K8s never removes a second server until the first is healthy again.
 - **Liveness, if any, is process-level — NOT the leader-gated check.** A leader-gated liveness probe
   would fail *all* servers during a quorum loss and restart-storm them, which makes Raft recovery
   strictly worse. Liveness checks only that the agent process is up.
