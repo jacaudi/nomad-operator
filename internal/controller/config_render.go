@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 
 	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
@@ -41,3 +42,6 @@ func firstOr(in []string, def string) string {
 	}
 	return in[0]
 }
+
+func itoa(i int) string                { return strconv.Itoa(i) }
+func trimLeadingSpace(s string) string { return strings.TrimPrefix(s, " ") }
