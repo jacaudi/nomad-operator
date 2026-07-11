@@ -29,6 +29,7 @@ var (
 	_ api.AgentHealth
 	_ api.WriteOptions
 	_ api.WriteMeta
+	_ api.UnexpectedResponseError
 )
 
 // Method / constructor signature pins (method expressions; receiver never evaluated).
@@ -46,6 +47,8 @@ var (
 	_ = (*api.ACLTokens).BootstrapOpts
 	_ = (*api.QueryOptions).WithContext
 	_ = (*api.WriteOptions).WithContext
+	_ = api.UnexpectedResponseError.StatusCode
+	_ = api.UnexpectedResponseError.Body
 )
 
 // Constant pins — the node status and eligibility value set the operator maps.

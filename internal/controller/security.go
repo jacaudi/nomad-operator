@@ -15,7 +15,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
+	"github.com/jacaudi/nomad-operator/internal/nomad"
 )
+
+// annotationACLBootstrapped is the DURABLE marker on the token Secret that
+// records a CONFIRMED-successful ACL bootstrap. It is set only after
+// ops.ACLBootstrap has actually succeeded (or told us the cluster was
+// already bootstrapped) — never merely because the Secret exists. Status
+// conditions are not durable (they're wiped/recomputed across reconciles),
+// so the annotation is the only safe idempotency gate; see
+// ensureBootstrapToken.
+const annotationACLBootstrapped = "nomad.operator.io/acl-bootstrapped"
 
 // ensureGossipKey creates a 32-byte base64-encoded gossip encryption key Secret
 // if one is not already present. Secret existence is the idempotency gate: once
@@ -83,38 +93,70 @@ func newBootstrapToken() (string, error) {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
-// ensureBootstrapToken is idempotent: if the token Secret already exists, it is
-// the source of truth and no bootstrap is attempted. Otherwise it generates a
-// token, WRITES THE SECRET FIRST, then calls BootstrapOpts with that token.
+// ensureBootstrapToken is idempotent-with-retry: the durable confirmation
+// marker (annotationACLBootstrapped on the token Secret) is the ONLY signal
+// that bootstrap has actually succeeded — Secret EXISTENCE alone is not
+// (design §3.3's retry guarantee requires this: a crash/error between
+// writing the Secret and confirming ACLBootstrap must re-attempt on the next
+// reconcile, not silently report success).
+//
+//   - Secret absent            → mint a token, Create the Secret (unannotated).
+//   - Secret present, annotated → durably confirmed; return nil, no API call.
+//   - Secret present, not yet
+//     annotated                → re-attempt bootstrap with the Secret's token
+//     (same token: crash-and-retry re-submits it, design §3.3).
+//
+// Either way, ops.ACLBootstrap is then called; on success — or on the
+// already-bootstrapped self-heal case — the Secret is annotated and this
+// returns nil. Any other error is returned so the caller requeues and
+// RE-ATTEMPTS on the next reconcile instead of wrongly reporting Ready.
 func (r *NomadClusterReconciler) ensureBootstrapToken(ctx context.Context, nc *nomadv1alpha1.NomadCluster, ops NomadOps) error {
 	n := names(nc)
-	var existing corev1.Secret
-	err := r.Get(ctx, types.NamespacedName{Name: n.TokenSecret, Namespace: nc.Namespace}, &existing)
-	if err == nil {
-		return nil // Secret is the source of truth; already bootstrapped
-	}
-	if !apierrors.IsNotFound(err) {
+	var sec corev1.Secret
+	err := r.Get(ctx, types.NamespacedName{Name: n.TokenSecret, Namespace: nc.Namespace}, &sec)
+	switch {
+	case err == nil:
+		if sec.Annotations[annotationACLBootstrapped] == "true" {
+			return nil // durably confirmed; steady state, no API call
+		}
+		// Secret exists but a prior attempt never confirmed bootstrap succeeded
+		// (e.g. a leader flap right after ACLBootstrap was called, or the
+		// operator crashed before writing the marker) — retry below with its
+		// existing token.
+	case apierrors.IsNotFound(err):
+		token, terr := newBootstrapToken()
+		if terr != nil {
+			return terr
+		}
+		// No controller ref: the token Secret is retained-by-design on CR delete
+		// (see ensureGossipKey) so the ACL bootstrap token survives CR deletion.
+		sec = corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: n.TokenSecret, Namespace: nc.Namespace, Labels: n.Labels()},
+			Data:       map[string][]byte{"token": []byte(token)},
+		}
+		if cerr := r.Create(ctx, &sec); cerr != nil {
+			return fmt.Errorf("write token secret: %w", cerr)
+		}
+	default:
 		return err
 	}
 
-	token, err := newBootstrapToken()
-	if err != nil {
-		return err
-	}
-	// No controller ref: the token Secret is retained-by-design on CR delete
-	// (see ensureGossipKey) so the ACL bootstrap token survives CR deletion.
-	sec := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: n.TokenSecret, Namespace: nc.Namespace, Labels: n.Labels()},
-		Data:       map[string][]byte{"token": []byte(token)},
-	}
-	if err := r.Create(ctx, sec); err != nil {
-		return fmt.Errorf("write token secret: %w", err)
+	if _, err := ops.ACLBootstrap(ctx, string(sec.Data["token"])); err != nil {
+		if !nomad.IsACLAlreadyBootstrapped(err) {
+			return fmt.Errorf("acl bootstrap: %w", err)
+		}
+		// Already bootstrapped out of band (e.g. a prior attempt's ACLBootstrap
+		// call succeeded but the operator crashed before writing the
+		// confirmation annotation): the cluster IS bootstrapped, so self-heal by
+		// marking the Secret confirmed instead of retrying forever.
 	}
 
-	if _, err := ops.ACLBootstrap(ctx, token); err != nil {
-		// "already bootstrapped" out of band: the Secret we just wrote is
-		// authoritative for OUR token; surface but do not delete the Secret.
-		return fmt.Errorf("acl bootstrap: %w", err)
+	if sec.Annotations == nil {
+		sec.Annotations = map[string]string{}
+	}
+	sec.Annotations[annotationACLBootstrapped] = "true"
+	if err := r.Update(ctx, &sec); err != nil {
+		return fmt.Errorf("mark token secret bootstrapped: %w", err)
 	}
 	return nil
 }

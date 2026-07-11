@@ -171,6 +171,19 @@ not delete/edit the Secret casually — treat it as a one-of-a-kind credential
 (design §3.8: it is deliberately retained across `NomadCluster` deletion for
 exactly this reason).
 
+**"Secret present but cluster un-bootstrapped" is not a stuck state.** The
+operator only treats bootstrap as confirmed once it has annotated the token
+Secret with `nomad.operator.io/acl-bootstrapped: "true"` — and it sets that
+annotation *only* after a confirmed-successful (or confirmed-already-done)
+`ACLBootstrap` call, never merely because the Secret exists. If a first
+bootstrap attempt fails transiently (e.g. a leader flap right after
+election), the Secret is left un-annotated and the next reconcile
+**re-attempts `ACLBootstrap` with the same token** rather than skipping it.
+So you should not normally need this procedure just because a reconcile
+raced with a leader election — give it a couple of reconcile intervals to
+self-heal first, and only fall back to the manual reset below if
+`ACLBootstrapped` stays `False` and the Secret stays un-annotated.
+
 1. Identify the current leader pod:
 
    ```bash

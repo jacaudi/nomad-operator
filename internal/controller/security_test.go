@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"testing"
 
@@ -11,6 +13,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/jacaudi/nomad-operator/internal/nomad"
 )
 
 var uuidV4Pattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
@@ -100,6 +104,36 @@ var _ = Describe("ACL bootstrap idempotency", func() {
 		nc.Status.Conditions = nil // simulate wiped status
 		Expect(r.ensureBootstrapToken(ctx, nc, fake)).To(Succeed())
 		Expect(fake.bootstrapped).To(BeFalse()) // gated on Secret, not condition
+	})
+})
+
+var _ = Describe("ACL bootstrap already-bootstrapped self-heal", func() {
+	It("marks the token Secret confirmed when ACLBootstrap reports the cluster was already bootstrapped out of band", func() {
+		ctx := context.Background()
+		ns := "acl-already"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		nc := minimalCluster("prod", ns)
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+
+		// A real *nomad.Client against a fake server returning Nomad's exact
+		// "already bootstrapped" response (see internal/nomad/errors_test.go),
+		// so this exercises the real nomad.IsACLAlreadyBootstrapped detection
+		// end to end rather than a hand-rolled error the fake invents.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte("ACL bootstrap already done (reset index: 7)"))
+		}))
+		defer srv.Close()
+		ops, err := nomad.New(nomad.Config{Address: srv.URL})
+		Expect(err).NotTo(HaveOccurred())
+
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(&fakeNomad{})}
+
+		Expect(r.ensureBootstrapToken(ctx, nc, ops)).To(Succeed())
+
+		var s corev1.Secret
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: names(nc).TokenSecret, Namespace: ns}, &s)).To(Succeed())
+		Expect(s.Annotations[annotationACLBootstrapped]).To(Equal("true"))
 	})
 })
 

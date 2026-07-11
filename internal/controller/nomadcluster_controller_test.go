@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -197,6 +198,70 @@ var _ = Describe("Managed provisioning", func() {
 			}
 		}
 		Expect(reason).To(Equal("QuorumLost"))
+	})
+
+	It("re-attempts ACLBootstrap on the next reconcile after a transient first-attempt failure, and does not report Ready/ACLBootstrapped or annotate the token Secret until confirmed", func() {
+		ctx := context.Background()
+		ns := "mgd-bootstrap-retry"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, "nomad-tls", ns)
+		nc := minimalCluster("retry", ns)
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+
+		// Leader is present (quorum healthy) but the FIRST ACLBootstrap call
+		// fails transiently (e.g. a leader flap right after election).
+		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true, bootstrapErr: errors.New("transient: leader flap")}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+
+		// First reconcile creates the Gateway (no address yet) → Pending.
+		reconcileOnce(r, "retry", ns)
+		gwName := names(nc).Gateway
+		var gw gwapiv1.Gateway
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: gwName, Namespace: ns}, &gw)).To(Succeed())
+		gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: "10.0.0.5"}}
+		Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
+
+		// Second reconcile provisions workloads, reaches bootstrapAndReady, and
+		// hits the transient ACLBootstrap failure. This is the CRITICAL
+		// assertion: the reconciler must NOT report Ready/ACLBootstrapped, and
+		// the token Secret it wrote must NOT carry the durable
+		// "acl-bootstrapped" marker — otherwise a later reconcile would wrongly
+		// treat the un-bootstrapped cluster as confirmed (the security bug this
+		// spec guards against).
+		reconcileOnce(r, "retry", ns)
+		Expect(fake.bootstrapCalls).To(Equal(1))
+
+		var afterFailure nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "retry", Namespace: ns}, &afterFailure)).To(Succeed())
+		Expect(afterFailure.Status.Phase).NotTo(Equal(nomadv1alpha1.PhaseReady))
+		Expect(meta_IsStatusConditionFalse(afterFailure.Status.Conditions, nomadv1alpha1.CondACLBootstrapped)).To(BeTrue())
+
+		var tokenSec corev1.Secret
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: names(nc).TokenSecret, Namespace: ns}, &tokenSec)).To(Succeed())
+		Expect(tokenSec.Annotations["nomad.operator.io/acl-bootstrapped"]).To(BeEmpty())
+		tokenBeforeRetry := tokenSec.Data["token"]
+
+		// Clear the transient error and reconcile again: the reconciler must
+		// RE-ATTEMPT ACLBootstrap (not skip it because the Secret exists), using
+		// the SAME token it already wrote (crash-and-retry re-submits the same
+		// token, design §3.3).
+		fake.bootstrapErr = nil
+		reconcileOnce(r, "retry", ns)
+		Expect(fake.bootstrapCalls).To(Equal(2)) // re-called, not skipped
+
+		var afterRetry nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "retry", Namespace: ns}, &afterRetry)).To(Succeed())
+		Expect(afterRetry.Status.Phase).To(Equal(nomadv1alpha1.PhaseReady))
+		Expect(meta_IsStatusConditionTrue(afterRetry.Status.Conditions, nomadv1alpha1.CondACLBootstrapped)).To(BeTrue())
+
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: names(nc).TokenSecret, Namespace: ns}, &tokenSec)).To(Succeed())
+		Expect(tokenSec.Annotations["nomad.operator.io/acl-bootstrapped"]).To(Equal("true"))
+		Expect(tokenSec.Data["token"]).To(Equal(tokenBeforeRetry)) // same token re-submitted
+
+		// Steady state: once confirmed, a further reconcile must NOT re-bootstrap
+		// (the existing Secret-gated idempotency guarantee still holds).
+		reconcileOnce(r, "retry", ns)
+		Expect(fake.bootstrapCalls).To(Equal(2))
 	})
 })
 
