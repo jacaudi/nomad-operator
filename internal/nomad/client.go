@@ -25,12 +25,13 @@ func New(cfg Config) (*Client, error) {
 		Region:   cfg.Region,
 		SecretID: cfg.Token,
 	}
-	if cfg.TLS != (TLSConfig{}) {
+	if cfg.TLS != (TLSConfig{}) || cfg.TLSServerName != "" {
 		apiCfg.TLSConfig = &api.TLSConfig{
-			CACert:     cfg.TLS.CACert,
-			ClientCert: cfg.TLS.ClientCert,
-			ClientKey:  cfg.TLS.ClientKey,
-			Insecure:   cfg.TLS.Insecure,
+			CACert:        cfg.TLS.CACert,
+			ClientCert:    cfg.TLS.ClientCert,
+			ClientKey:     cfg.TLS.ClientKey,
+			Insecure:      cfg.TLS.Insecure,
+			TLSServerName: cfg.TLSServerName,
 		}
 	}
 	c, err := api.NewClient(apiCfg)
@@ -74,4 +75,38 @@ func (c *Client) Ping(ctx context.Context) error {
 		return fmt.Errorf("nomad: ping: %w", err)
 	}
 	return nil
+}
+
+// Leader returns the current Raft leader's "ip:port" RPC address, or an error
+// if no leader is known. Status().Leader takes no QueryOptions, so ctx is
+// retained for a uniform signature but not threaded (same as Ping).
+func (c *Client) Leader(ctx context.Context) (string, error) {
+	leader, err := c.api.Status().Leader()
+	if err != nil {
+		return "", fmt.Errorf("nomad: leader: %w", err)
+	}
+	return leader, nil
+}
+
+// ServerHealthy reports whether this agent's server subsystem is healthy
+// (which, for Nomad, requires a known leader). Agent().Health takes no
+// QueryOptions; ctx is retained for signature uniformity.
+func (c *Client) ServerHealthy(ctx context.Context) (bool, error) {
+	h, err := c.api.Agent().Health()
+	if err != nil {
+		return false, fmt.Errorf("nomad: health: %w", err)
+	}
+	return h.Server != nil && h.Server.Ok, nil
+}
+
+// ACLBootstrap bootstraps the ACL system with an operator-supplied management
+// token (Nomad's BootstrapOpts form) and returns the resulting secret ID. Using
+// a supplied token makes bootstrap idempotent: the caller persists the token
+// first, then calls this, so a crash-and-retry re-submits the same token.
+func (c *Client) ACLBootstrap(ctx context.Context, bootstrapToken string) (string, error) {
+	tok, _, err := c.api.ACLTokens().BootstrapOpts(bootstrapToken, (&api.WriteOptions{}).WithContext(ctx))
+	if err != nil {
+		return "", fmt.Errorf("nomad: acl bootstrap: %w", err)
+	}
+	return tok.SecretID, nil
 }

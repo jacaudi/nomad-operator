@@ -22,6 +22,13 @@ var (
 	_ api.NodeListStub
 	_ api.Node
 	_ api.DriverInfo
+	_ api.Status
+	_ api.ACLTokens
+	_ api.ACLToken
+	_ api.AgentHealthResponse
+	_ api.AgentHealth
+	_ api.WriteOptions
+	_ api.WriteMeta
 )
 
 // Method / constructor signature pins (method expressions; receiver never evaluated).
@@ -29,10 +36,16 @@ var (
 	_ = api.NewClient
 	_ = (*api.Client).Nodes
 	_ = (*api.Client).Agent
+	_ = (*api.Client).Status
+	_ = (*api.Client).ACLTokens
 	_ = (*api.Nodes).List
 	_ = (*api.Nodes).Info
 	_ = (*api.Agent).Self
+	_ = (*api.Agent).Health
+	_ = (*api.Status).Leader
+	_ = (*api.ACLTokens).BootstrapOpts
 	_ = (*api.QueryOptions).WithContext
+	_ = (*api.WriteOptions).WithContext
 )
 
 // Constant pins — the node status and eligibility value set the operator maps.

@@ -62,3 +62,20 @@ func TestNewRejectsBadConfig(t *testing.T) {
 		t.Fatal("expected error for empty Address")
 	}
 }
+
+func TestWriteMethodSignaturesErrorWithoutServer(t *testing.T) {
+	c, err := New(Config{Address: "http://127.0.0.1:14646"}) // nothing listening
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	ctx := t.Context()
+	if _, err := c.Leader(ctx); err == nil {
+		t.Error("Leader() with no server: want error, got nil")
+	}
+	if _, err := c.ServerHealthy(ctx); err == nil {
+		t.Error("ServerHealthy() with no server: want error, got nil")
+	}
+	if _, err := c.ACLBootstrap(ctx, "3b5e0f0a-8c1e-4c2a-9f3a-1d2e3f4a5b6c"); err == nil {
+		t.Error("ACLBootstrap() with no server: want error, got nil")
+	}
+}

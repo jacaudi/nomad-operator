@@ -9,7 +9,11 @@ type Config struct {
 	Address string // e.g. http://127.0.0.1:4646
 	Region  string // optional
 	Token   string // ACL token; empty in dev mode
-	TLS     TLSConfig
+	// TLSServerName overrides the server name verified during the TLS handshake.
+	// Nomad verifies role/region names (e.g. "server.<region>.nomad"), not the
+	// dialed address, so callers set this rather than relying on IP/DNS SANs.
+	TLSServerName string
+	TLS           TLSConfig
 }
 
 // TLSConfig holds optional TLS material for talking to Nomad over HTTPS.

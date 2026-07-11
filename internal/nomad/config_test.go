@@ -22,3 +22,16 @@ func TestConfigValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigTLSServerNameOptional(t *testing.T) {
+	// Empty TLSServerName must remain valid (additive, backward compatible).
+	cfg := Config{Address: "https://127.0.0.1:4646"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil", err)
+	}
+	// A Config carrying TLSServerName must construct a client without error.
+	cfg2 := Config{Address: "https://127.0.0.1:4646", TLSServerName: "server.global.nomad"}
+	if _, err := New(cfg2); err != nil {
+		t.Fatalf("New() with TLSServerName = %v, want nil", err)
+	}
+}
