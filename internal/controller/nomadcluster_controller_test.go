@@ -84,6 +84,11 @@ var _ = Describe("Managed provisioning", func() {
 		gwName := names(nc).Gateway
 		var gw gwapiv1.Gateway
 		Expect(k8s.Get(ctx, types.NamespacedName{Name: gwName, Namespace: ns}, &gw)).To(Succeed())
+
+		var afterFirst nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "prod", Namespace: ns}, &afterFirst)).To(Succeed())
+		Expect(afterFirst.Status.Phase).To(Equal(nomadv1alpha1.PhasePending))
+
 		gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: "10.0.0.5"}}
 		Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
 
@@ -95,6 +100,10 @@ var _ = Describe("Managed provisioning", func() {
 		Expect(ss.Spec.PodManagementPolicy).To(Equal(appsv1.ParallelPodManagement))
 		var tcp gwapiv1a2.TCPRoute
 		Expect(k8s.Get(ctx, types.NamespacedName{Name: "prod-rpc-0", Namespace: ns}, &tcp)).To(Succeed())
+
+		var afterSecond nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "prod", Namespace: ns}, &afterSecond)).To(Succeed())
+		Expect(afterSecond.Status.Phase).To(Equal(nomadv1alpha1.PhaseBootstrapping))
 	})
 })
 
