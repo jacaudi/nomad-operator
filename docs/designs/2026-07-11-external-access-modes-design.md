@@ -176,6 +176,11 @@ spec:
 - **The real fixture churn is the test suite, not the sample CR** (`config/samples/nomad_v1alpha1_nomadcluster.yaml` is empty `spec: # TODO(user)` scaffolding — filling it with a concrete `externalAccess` example is a docs task, not a migration). The specs that build `nc.Spec.Gateway = GatewaySpec{...}` and must move to `nc.Spec.ExternalAccess.Gateway` are: `resources_gateway_test.go`, `nomadcluster_controller_test.go`, `gatewaywatch_test.go`. Add new LoadBalancer-mode specs (§9).
 - Update `docs/runbooks/nomadcluster.md` (add the LB-mode section + the `-tls-server-name` HTTP note from §4).
 
+**Plan-time safeguards (from the SGE double-check):**
+- **Grep `Spec.Gateway` exhaustively** before wiring, and confirm each hit is either mode-gated (Gateway-only builders in `resources_gateway.go`, which only run in Gateway mode after the §7 partition) or nil-guarded (the three shared/LB-path sites in §7). The read-site list in §7 is derived from a read of the touched files, not an exhaustive grep — the grep makes "no missed deref" certain.
+- **Thread the LB ingress address into `renderConfig` as its `gatewayAddress` arg** (not only into `buildConfigMap`), so the `gw=` term in the rollout hash covers an LB-IP change — a changed LB address must re-render `advertise.rpc` and therefore must roll the StatefulSet.
+- Also fix the `TLSSpec` SAN doc comment (`nomadcluster_types.go:66`) that names `spec.gateway.httpHostname` (Gateway-mode-only guidance now).
+
 ---
 
 ## 9. Testing
