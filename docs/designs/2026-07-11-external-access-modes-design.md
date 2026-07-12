@@ -1,7 +1,9 @@
 # External Access Modes (Gateway + LoadBalancer) — Design
 
-**Type:** design · **Date:** 2026-07-11 · **Status:** proposed
+**Type:** design · **Date:** 2026-07-11 (amended 2026-07-12 after SGE review) · **Status:** proposed
 **Feature:** restructure `spec.gateway` into `spec.externalAccess { mode: Gateway | LoadBalancer }` and add a `LoadBalancer` external-access mode for single-node control planes.
+
+> **Amended 2026-07-12** after an independent sr-go-engineer design review (verdict: no blocking issues; four important gaps folded). The review verified the networking model (§§2–4, §6) against the merged slice-2 code and found it sound; the amendments correct the *mechanism* descriptions to match the real code (there is no Go "advertise renderer" — advertise is written by the init-container shell script; the restructure has nil-deref and reconcile-partition implications the first draft glossed) and close the HTTP-cert gap in LoadBalancer mode. Changed sections: §4, §5.2, §7, §8, §11.
 
 Follows slice 2 (NomadCluster HA control plane, merged `a1e4d6a`) and FR-1 (single-node `servers: 1`, `349f5cc`). Companion to FR-1: gives single-node clusters a way to expose the control plane to external edge agents **without a Gateway API controller**.
 
@@ -94,9 +96,9 @@ advertise.serf = POD_IP   (in-cluster, unchanged)
 
 **External address discovery + gate:** the operator reads the LB's assigned address from the Service `status.loadBalancer.ingress` (IP or hostname), exactly as Gateway mode reads `Gateway.status.addresses`. Until an ingress address exists, the cluster stays `Pending` (same gate as the Gateway-address gate). Issue-7's `Owns(&corev1.Service{})` means the operator automatically re-reconciles when the LB IP is assigned — no manual nudge.
 
-**Advertise rendering:** the existing renderer is already parameterized by an external address + RPC port. LoadBalancer mode passes `(externalAddr = lb-ingress, rpcPort = 4647)`; Gateway mode passes `(externalAddr = gwAddr, rpcPort = rpcPorts[ordinal])`. Single branch on the RPC advertise port.
+**Advertise rendering:** there is no Go "advertise renderer" — the per-pod advertise stanza is written at boot by the init-container shell script (`initEntrypoint` in `resources_workload.go`), which reads two ConfigMap keys: `gateway_address` and `rpc_ports` (a space-separated list; the script indexes it by the pod ordinal). `buildConfigMap` currently populates `rpc_ports` from `spec.gateway.rpcPorts` and `renderConfig` folds the same list into the rollout hash. **LoadBalancer-mode reuse** therefore means: feed the LB ingress address as `gateway_address`, and have `buildConfigMap`/`renderConfig` **synthesize a single-element `rpc_ports = "4647"`** (the `gateway` block — and thus `rpcPorts` — is absent in LB mode). The shell script is unchanged (`ORD=0` selects the sole port; it already emits `advertise.http = <addr>:4646`, `advertise.rpc = <addr>:4647`, `advertise.serf = POD_IP`). No new renderer, but `buildConfigMap`/`renderConfig` gain a mode branch that produces the single RPC port instead of dereferencing `spec.gateway`.
 
-**mTLS/cert:** unchanged. Nomad RPC is role-verified (`server.<region>.nomad`), so the LB address does **not** need to be in the cert for edge agents to join. The existing `certSecretRef` cert works as-is.
+**mTLS/cert — RPC is settled, HTTP needs a note.** Nomad **RPC** is role-verified (`server.<region>.nomad`), so the LB address does **not** need to be in the cert for edge agents to join over RPC 4647 — the existing `certSecretRef` cert works as-is for the RPC lens. **HTTP is different:** the operator advertises `http = <lb-ingress>:4646` and exposes 4646 on the LB Service, and HTTP is verified against the *dialed address*, not a role. In Gateway mode the cert covers `httpHostname` (a required SAN, `TLSSpec` in `nomadcluster_types.go`); LoadBalancer mode has no `httpHostname`. So an external UI/CLI client dialing `https://<lb>:4646` hits a hostname mismatch unless it passes `-tls-server-name server.<region>.nomad` (which the cert already covers) or the LB address is added to the cert SANs. **Decision (KISS/YAGNI):** do not add an `httpHostname` field to the `loadBalancer` block yet — document in the runbook that external HTTP/UI access in LB mode requires `-tls-server-name server.<region>.nomad`. Add the field additively (No-Wall) only if a real "native-hostname UI over the LB" need appears. The operator's own in-cluster client is unaffected (it already sets `TLSServerName` in `clientFor`).
 
 ---
 
@@ -130,6 +132,8 @@ spec:
 - `gateway` union: `className` required when `gateway.mode == Managed`; `ref` required when `gateway.mode == Existing` (unchanged, re-homed).
 - `externalAccess.mode == LoadBalancer` ⇒ `externalAccess.gateway` must be absent (and vice-versa) — enforce the union so only the active mode's block is set.
 
+**CEL placement (verified against the current markers):** the two cross-field rules — `mode==LoadBalancer ⇒ servers==1` and `mode==Gateway ⇒ size(gateway.rpcPorts)==servers` — reference both `self.servers` and `self.externalAccess.*`, so they live on `NomadClusterSpec` (root), **replacing** the current root rule `size(self.gateway.rpcPorts) == self.servers` (`nomadcluster_types.go:101`). Both must be written as **guarded implications** (e.g. `self.externalAccess.mode != 'Gateway' || size(self.externalAccess.gateway.rpcPorts) == self.servers`) so CEL never dereferences `gateway.rpcPorts` when the gateway block is absent. The `rpcPorts` immutability rule and the `className`/`ref` union rules move **verbatim** onto the re-homed `GatewaySpec` (they only reference `self` within that struct). No CEL feasibility blocker.
+
 ---
 
 ## 6. Not built: split-horizon DNS (documented rationale)
@@ -146,11 +150,19 @@ spec:
 
 ## 7. Reconcile changes
 
-- `Reconcile` dispatches on `externalAccess.mode`:
-  - `Gateway` → existing `ensureGateway` (Managed/Existing), route + per-pod-Service provisioning, `gwAddr` from Gateway status.
+- `Reconcile` dispatches on `externalAccess.mode` for the **address gate**:
+  - `Gateway` → existing `ensureGateway` (Managed/Existing), `gwAddr` from Gateway status.
   - `LoadBalancer` → new `ensureLoadBalancer`: apply the `type: LoadBalancer` Service, read `status.loadBalancer.ingress`, return `(addr, ready)`.
-- All read sites of `spec.gateway` move to `spec.externalAccess.gateway`.
-- `SetupWithManager` (post Issue-7) already `Owns(&corev1.Service{})`, so LB IP assignment triggers reconcile; add `Owns` for nothing new. Existing-mode Gateway watch unchanged.
+- **The step-3 provisioning block must be partitioned by mode** (it is not today — the routes and per-pod Services are provisioned *inline in `Reconcile`* after `ensureGateway` returns, `nomadcluster_controller.go:128-140`, mixed with the shared objects):
+  - **shared, always:** ConfigMap, headless Service, API Service, StatefulSet, PDB.
+  - **Gateway-only:** `buildTLSRoute`, `buildTCPRoutes`, and the per-pod `buildPodService` loop.
+  - **LoadBalancer-only:** the new `buildLoadBalancerService`.
+  This is a restructure of the reconcile body (shared vs Gateway-only vs LB-only), not a one-line `ensureGateway`→`ensureLoadBalancer` swap.
+- **Read sites of `spec.gateway` move to `spec.externalAccess.gateway`, which is now an optional pointer (nil in LB mode) — so the move is not purely mechanical; three sites need nil guards:**
+  - `buildConfigMap` and `renderConfig` read `spec.gateway.rpcPorts` on **every** mode → must synthesize the single RPC port in LB mode (per §4) instead of dereferencing.
+  - **`gatewayToClusters` (`nomadcluster_controller.go:255-256`) is the sharp one:** it iterates **all** `NomadCluster`s on **any** Gateway event and reads `nc.Spec.Gateway.Ref/.Mode`. With even one LB-mode cluster present, `ExternalAccess.Gateway == nil` → the map func panics on every Gateway event, **crash-looping the controller for the whole cluster set.** Guard with `if nc.Spec.ExternalAccess.Gateway == nil { continue }` before the dereference.
+- **Status naming:** in LB mode the discovered address currently lands in `status.gatewayAddress` gated by `CondGatewayReady` — a "gateway" name for a non-Gateway address. Since `v1alpha1` is unreleased, rename to mode-neutral `status.externalAddress` + an `ExternalAccessReady` condition now (free now, painful later). Gateway mode keeps the same semantics under the neutral name.
+- `SetupWithManager` (post Issue-7) already `Owns(&corev1.Service{})`, so the status-only `status.loadBalancer.ingress` write re-enqueues the owning cluster and the `Pending`-until-ingress gate re-fires — reactivity is free, no Watch/predicate needed. **Do not add a `GenerationChangedPredicate` to `Owns(&corev1.Service{})`** — a status-only update carries no generation bump, so a generation filter would silently break LB-address reactivity. Existing-mode Gateway watch unchanged.
 - Phase machine, gossip, cert gate, ACL bootstrap, teardown retention — all unchanged; they are external-access-agnostic.
 
 ---
@@ -158,9 +170,11 @@ spec:
 ## 8. Migration
 
 `v1alpha1` unreleased ⇒ breaking change, no conversion webhook needed:
-- Rename the Go types (`GatewaySpec` stays, gains an `ExternalAccessSpec` parent + `LoadBalancerSpec`), update `NomadClusterSpec`.
-- Regenerate CRD + deepcopy.
-- Update every reconcile read site, the sample CR, `docs/runbooks/nomadcluster.md`, and all tests/fixtures.
+- Rename the Go types (`GatewaySpec` stays, gains an `ExternalAccessSpec` parent — with `Gateway *GatewaySpec` optional + `LoadBalancer *LoadBalancerSpec` optional), update `NomadClusterSpec` (`Gateway GatewaySpec` → `ExternalAccess ExternalAccessSpec`).
+- Regenerate CRD + deepcopy (`make manifests generate`).
+- Update every reconcile read site (see §7's nil-guard list) and the mode-neutral status field.
+- **The real fixture churn is the test suite, not the sample CR** (`config/samples/nomad_v1alpha1_nomadcluster.yaml` is empty `spec: # TODO(user)` scaffolding — filling it with a concrete `externalAccess` example is a docs task, not a migration). The specs that build `nc.Spec.Gateway = GatewaySpec{...}` and must move to `nc.Spec.ExternalAccess.Gateway` are: `resources_gateway_test.go`, `nomadcluster_controller_test.go`, `gatewaywatch_test.go`. Add new LoadBalancer-mode specs (§9).
+- Update `docs/runbooks/nomadcluster.md` (add the LB-mode section + the `-tls-server-name` HTTP note from §4).
 
 ---
 
@@ -170,6 +184,7 @@ spec:
 - **LoadBalancer reconcile (envtest):** create a `servers:1` LoadBalancer-mode cluster; the operator applies the LB Service and stays `Pending` until its `status.loadBalancer.ingress` is stubbed; then provisions and reaches `Ready` with `advertise.rpc = <lb>:4647`; no Gateway/route/per-pod-Service objects created.
 - **Builders (unit):** `buildLoadBalancerService` (selector, RPC+HTTP ports, class/annotations); advertise renderer emits `:4647` in LB mode.
 - **Regression:** all existing Gateway-mode specs pass under the re-homed path.
+- **Crash-loop guard (unit):** `gatewayToClusters` returns cleanly (no panic) when the cluster list contains a LoadBalancer-mode cluster (`ExternalAccess.Gateway == nil`) — the §7 nil guard. Similarly `buildConfigMap`/`renderConfig` return the single `:4647` port for a LB-mode cluster without dereferencing an absent gateway block.
 - **Local e2e (optional, out of plan):** re-run the slice-2 single-node e2e in LoadBalancer mode on kind + a LB provider (metallb) instead of the Gateway stub + socat proxy.
 
 ---
@@ -185,5 +200,6 @@ spec:
 ## 11. Open items / assumptions
 
 - Assumes a LoadBalancer provider exists in the cluster (cloud LB, metallb, Cilium LBIPAM). If none, the LB Service stays address-less and the cluster stays `Pending` (same failure shape as a missing Gateway controller) — document in the runbook.
-- `annotations` pass-through is untyped by design (cloud-specific); no validation beyond map[string]string.
-- Whether `externalAccess.mode` should be immutable vs. mutable-with-rollout: chosen **immutable** for KISS (mode switching would rewrite the entire external surface). Revisit only if a real switch-in-place need appears.
+- `annotations` pass-through is untyped by design (cloud-specific); no validation beyond map[string]string. It already covers the **static-IP** case (modern providers request a fixed address via annotation; `Service.spec.loadBalancerIP` is deprecated), so no dedicated IP field is needed.
+- **Two typed `Service` fields are deliberately out of reach of `annotations` and deferred (YAGNI), recorded so the deferral is conscious:** `externalTrafficPolicy: Local` (source-IP preservation / single hop) and `loadBalancerSourceRanges` (CIDR firewall). The latter is genuine defense-in-depth for an internet-facing edge control plane whose only gate is mTLS — a plausible near-term follow-up. Add either additively to the `loadBalancer` block when a real need appears (No-Wall).
+- Whether `externalAccess.mode` should be immutable vs. mutable-with-rollout: chosen **immutable** for KISS (mode switching would tear down/rebuild the entire external surface — Gateway+routes ↔ LB Service — and change the advertised address, forcing every edge agent to re-learn `advertise.rpc`). **Tension to note:** `servers: 1` legitimately supports *both* modes, so "I'm on Gateway at `servers: 1` and want to drop the Gateway-controller dependency for a plain LB" is a plausible real want that immutability forecloses. Keep immutable for v1; if that switch-in-place need materializes, a mutable-with-rollout path is a clean additive follow-up.
