@@ -21,11 +21,17 @@ import (
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
 	"github.com/jacaudi/nomad-operator/internal/nomad"
@@ -234,12 +240,53 @@ func (r *NomadClusterReconciler) bootstrapAndReady(ctx context.Context, nc *noma
 
 const requeueSteady = 60 * time.Second
 
+// gatewayToClusters maps a watched Gateway to the NomadClusters that
+// reference it in Existing mode (spec.gateway.mode == Existing &&
+// spec.gateway.ref names this Gateway). Managed-mode Gateways are already
+// covered by Owns(&gwapiv1.Gateway{}) and never match here, since Managed
+// clusters have no spec.gateway.ref.
+func (r *NomadClusterReconciler) gatewayToClusters(ctx context.Context, obj client.Object) []reconcile.Request {
+	var list nomadv1alpha1.NomadClusterList
+	if err := r.List(ctx, &list); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for _, nc := range list.Items {
+		ref := nc.Spec.Gateway.Ref
+		if nc.Spec.Gateway.Mode != nomadv1alpha1.GatewayModeExisting || ref == nil {
+			continue
+		}
+		if ref.Name == obj.GetName() && ref.Namespace == obj.GetNamespace() {
+			reqs = append(reqs, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: nc.Namespace},
+			})
+		}
+	}
+	return reqs
+}
+
 func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.NewNomadClient == nil {
 		r.NewNomadClient = DefaultNomadClientFactory
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nomadv1alpha1.NomadCluster{}).
+		// Own every secondary object apply() sets a controller ref on (§security.go
+		// apply), so drift on any of them triggers a reconcile. The gossip/token
+		// Secrets are deliberately excluded — they're created via r.Create with no
+		// controller ref (retained-by-design on CR delete); the cert Secret is
+		// user/cert-manager-owned and never written by this operator.
+		Owns(&appsv1.StatefulSet{}).
+		Owns(&corev1.Service{}).
+		Owns(&corev1.ConfigMap{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
+		Owns(&gwapiv1.Gateway{}). // Managed-mode Gateway only; Existing-mode is not owned.
+		Owns(&gwapiv1a2.TCPRoute{}).
+		Owns(&gwapiv1a2.TLSRoute{}).
+		// Existing-mode Gateways are user-owned (no controller ref), so they can't
+		// be covered by Owns; watch them explicitly and map back to referencing
+		// NomadClusters (issue 7).
+		Watches(&gwapiv1.Gateway{}, handler.EnqueueRequestsFromMapFunc(r.gatewayToClusters)).
 		Named("nomadcluster").
 		Complete(r)
 }
