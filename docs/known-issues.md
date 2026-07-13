@@ -72,14 +72,14 @@ Source: slice-2 whole-branch review, 2026-07-11.
   blip" (e.g. only gate to `Pending` when phase is empty/`Pending`, mirroring the
   Bootstrapping-seed guard added for the Ready→Degraded fix).
 
-## 6. Existing-mode `GatewayReady=False` reason is imprecise
+## 6. Existing-mode `ExternalAccessReady=False` reason is imprecise
 
 - **Severity:** Minor · **Area:** Existing-mode diagnostics
 - **Location:** `internal/controller/nomadcluster_controller.go` (gateway gate condition,
   ~:105) and `ensureExistingGateway` in `internal/controller/resources_gateway.go`
 - **Problem:** all Existing-mode verification failures (Gateway not found, missing/misnamed
   listener, namespace not admitted, no address yet) collapse into a single generic
-  `GatewayReady=False` / `"WaitingForAddress"` reason. Operators can't tell which prerequisite
+  `ExternalAccessReady=False` / `"WaitingForAddress"` reason. Operators can't tell which prerequisite
   failed from status alone.
 - **Mitigation in place:** documented as a manual diagnosis checklist in
   `docs/runbooks/nomadcluster.md` §6.
@@ -87,7 +87,7 @@ Source: slice-2 whole-branch review, 2026-07-11.
   the fixed `ensureGateway`/`ensureExistingGateway` `(string, bool, error)` signature — a
   design change beyond the slice.
 - **Proposed fix:** return a typed verification result (reason enum + message) from
-  `ensureExistingGateway` and surface it in the `GatewayReady` condition.
+  `ensureExistingGateway` and surface it in the `ExternalAccessReady` condition.
 
 ---
 
@@ -130,7 +130,7 @@ Source: slice-2 whole-branch review, 2026-07-11.
   `status.addresses` but does not set up a Watch on that Gateway. If the user's Gateway gets
   its address assigned (or changed) AFTER the operator's reconcile, the operator won't react
   until its periodic resync or the next NomadCluster change — so the cluster can sit at
-  `Pending`/stale `gatewayAddress` longer than necessary. Observed directly: patching the
+  `Pending`/stale `externalAddress` longer than necessary. Observed directly: patching the
   Gateway's `status.addresses` did not trigger a reconcile; a manual CR annotation was needed.
 - **Proposed fix:** add a `Watches` on `gatewayapi.Gateway` in `SetupWithManager` mapping the
   referenced Gateway back to the owning NomadCluster(s) (Existing mode), OR watch the operator's

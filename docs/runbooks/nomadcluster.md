@@ -94,7 +94,7 @@ spec:
 ```
 
 Without a pool, the Gateway never gets `status.addresses`, and reconcile
-stalls at `GatewayReady=False` / `WaitingForAddress` indefinitely.
+stalls at `ExternalAccessReady=False` / `WaitingForAddress` indefinitely.
 
 ### 1.4 Schedulable node count
 
@@ -112,7 +112,7 @@ node, a TrueNAS box, etc.) can join over the Gateway's exposed RPC surface.
 1. Fetch the assigned Gateway address and the CA used by the cluster:
 
    ```bash
-   kubectl get nomadcluster <name> -n <ns> -o jsonpath='{.status.gatewayAddress}'
+   kubectl get nomadcluster <name> -n <ns> -o jsonpath='{.status.externalAddress}'
    kubectl get secret <name>-nomad-tls -n <ns> -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
    ```
 
@@ -126,7 +126,7 @@ node, a TrueNAS box, etc.) can join over the Gateway's exposed RPC surface.
 
    client {
      enabled = true
-     servers = ["<gatewayAddress>:14647", "<gatewayAddress>:24647", "<gatewayAddress>:34647"]
+     servers = ["<externalAddress>:14647", "<externalAddress>:24647", "<externalAddress>:34647"]
    }
 
    tls {
@@ -226,11 +226,11 @@ self-heal first, and only fall back to the manual reset below if
 This is manual and invasive by design — it is a last resort, not a routine
 operation.
 
-## 4. Verify: `gatewayAddress` must be pod-routable
+## 4. Verify: `externalAddress` must be pod-routable
 
 **Load-bearing assumption (design §7.1).** Inter-server Raft rides
-`advertise.rpc = <status.gatewayAddress>:<rpcPorts[ordinal]>` — the same
-address external clients dial. If `status.gatewayAddress` is not reachable
+`advertise.rpc = <status.externalAddress>:<rpcPorts[ordinal]>` — the same
+address external clients dial. If `status.externalAddress` is not reachable
 *from inside the cluster's pod network*, the Nomad servers cannot form quorum
 with each other, regardless of how healthy the Gateway looks externally.
 
@@ -239,7 +239,7 @@ quorum fails to form after a Gateway address change:
 
 ```bash
 kubectl run gw-dial-test -n <ns> --rm -it --restart=Never --image=busybox -- \
-  sh -c 'nc -zv <gatewayAddress> 14647 && nc -zv <gatewayAddress> 24647 && nc -zv <gatewayAddress> 34647'
+  sh -c 'nc -zv <externalAddress> 14647 && nc -zv <externalAddress> 24647 && nc -zv <externalAddress> 34647'
 ```
 
 All three (one per `rpcPorts` entry) must connect. If any fail, the Cilium
@@ -316,14 +316,14 @@ listeners:
 
 The operator currently surfaces a **single generic reason** for every
 Existing-mode Gateway verification failure:
-`GatewayReady=False` / `WaitingForAddress` /
+`ExternalAccessReady=False` / `WaitingForAddress` /
 `"gateway address not assigned"`. This one message covers several distinct
 root causes — a missing or misnamed listener, a namespace `allowedRoutes`
 that doesn't admit the cluster's namespace, or simply no address assigned
 yet — so it does not by itself tell you which one applies.
 
 When a `NomadCluster` with `spec.gateway.mode: Existing` is stuck at
-`GatewayReady=False`, check these in order:
+`ExternalAccessReady=False`, check these in order:
 
 1. **Does the referenced Gateway exist?**
 
