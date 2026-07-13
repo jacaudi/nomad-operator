@@ -156,7 +156,6 @@ Extract the per-cluster config construction from `NomadClusterReconciler.clientF
 package controller
 
 import (
-	"context"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -184,7 +183,7 @@ func TestClusterNomadConfig(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithObjects(cert, tok).Build()
 
-	cfg, err := clusterNomadConfig(context.Background(), c, nc)
+	cfg, err := clusterNomadConfig(t.Context(), c, nc)
 	if err != nil {
 		t.Fatalf("clusterNomadConfig: %v", err)
 	}
@@ -339,12 +338,13 @@ type NodeReference struct {
 // on NomadNodeSpec means "drain this node"; its absence means "do not drain".
 type NodeDrainSpec struct {
 	// Deadline is how long remaining allocations may take to migrate before
-	// they are force-stopped. Zero means no deadline; the operator substitutes
-	// 1h when unset. +optional
+	// they are force-stopped. It is a POINTER so unset is distinguishable from
+	// an explicit zero: nil → the operator substitutes 1h; an explicit value is
+	// used verbatim, where 0 means "no deadline" (drain gracefully forever).
 	// +optional
-	Deadline metav1.Duration `json:"deadline,omitempty"`
+	Deadline *metav1.Duration `json:"deadline,omitempty"`
 	// +optional
-	IgnoreSystemJobs bool `json:"ignoreSystemJobs,omitempty"`
+	IgnoreSystemJobs bool `json:"ignoreSystemJobs,omitzero"`
 }
 
 // NomadNodeSpec is the desired state of a NomadNode. clusterRef + nodeName are
@@ -359,10 +359,13 @@ type NomadNodeSpec struct {
 	// +kubebuilder:validation:Required
 	NodeName string `json:"nodeName"`
 	// Eligible is the scheduling-eligibility target when the node is not
-	// actively draining. Defaults true; the reflector seeds it from observed
-	// state at first mint.
+	// actively draining. Defaults true for a hand-omitted field; it is NOT
+	// omitempty, so the reflector's seeded value — including a deliberate false
+	// for an observed-ineligible node — is always sent and never clobbered by
+	// the default.
 	// +kubebuilder:default=true
-	Eligible bool `json:"eligible,omitempty"`
+	// +optional
+	Eligible bool `json:"eligible"`
 	// Drain, when set, requests a drain; remove it to cancel.
 	// +optional
 	Drain *NodeDrainSpec `json:"drain,omitempty"`
@@ -789,7 +792,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/nomad/api"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -824,7 +826,11 @@ func (r *NomadNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if nc.Status.Phase != nomadv1alpha1.PhaseReady {
-		return ctrl.Result{RequeueAfter: nodeResync}, nil // not listable yet
+		// Not listable — flag the cluster's existing nodes, leave status stale.
+		if err := r.markClusterNotReady(ctx, &nc); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: nodeResync}, nil
 	}
 
 	cfg, err := clusterNomadConfig(ctx, r.Client, &nc)
@@ -837,19 +843,23 @@ func (r *NomadNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	stubs, err := ops.ListNodes(ctx)
 	if err != nil {
-		return ctrl.Result{RequeueAfter: nodeResync}, nil // transient: prune nothing
+		// Transient (unreachable): prune nothing; flag the nodes ClusterNotReady.
+		if merr := r.markClusterNotReady(ctx, &nc); merr != nil {
+			return ctrl.Result{}, merr
+		}
+		return ctrl.Result{RequeueAfter: nodeResync}, nil
 	}
 
 	bound, dupes := bindNodes(stubs)
-	for name, stub := range bound {
-		if err := r.upsertNode(ctx, &nc, name, stub, ops); err != nil {
+	for _, stub := range bound {
+		if err := r.upsertNode(ctx, &nc, stub, ops); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 	if err := r.markDuplicates(ctx, &nc, dupes); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.pruneAbsent(ctx, &nc, bound); err != nil {
+	if err := r.pruneAbsent(ctx, &nc, bound, dupes); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: nodeResync}, nil
@@ -869,8 +879,8 @@ func bindNodes(stubs []*api.NodeListStub) (map[string]*api.NodeListStub, map[str
 // upsertNode creates-or-updates the NomadNode for one bound stub: sanitized
 // metadata.name, ownerRef to the cluster, spec seeded ONCE at create, status
 // mirrored every pass, then desired state driven onto Nomad.
-func (r *NomadNodeReconciler) upsertNode(ctx context.Context, nc *nomadv1alpha1.NomadCluster, nodeName string, stub *api.NodeListStub, ops NomadNodeOps) error {
-	objName := sanitizeNodeName(nodeName)
+func (r *NomadNodeReconciler) upsertNode(ctx context.Context, nc *nomadv1alpha1.NomadCluster, stub *api.NodeListStub, ops NomadNodeOps) error {
+	objName := sanitizeNodeName(stub.Name)
 	var nn nomadv1alpha1.NomadNode
 	err := r.Get(ctx, types.NamespacedName{Name: objName, Namespace: nc.Namespace}, &nn)
 	switch {
@@ -879,7 +889,7 @@ func (r *NomadNodeReconciler) upsertNode(ctx context.Context, nc *nomadv1alpha1.
 			ObjectMeta: metav1.ObjectMeta{Name: objName, Namespace: nc.Namespace, Labels: names(nc).Labels()},
 			Spec: nomadv1alpha1.NomadNodeSpec{
 				ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name},
-				NodeName:   nodeName,
+				NodeName:   stub.Name,
 				Eligible:   stub.SchedulingEligibility != api.NodeSchedulingIneligible, // seed from observed
 			},
 		}
@@ -889,11 +899,25 @@ func (r *NomadNodeReconciler) upsertNode(ctx context.Context, nc *nomadv1alpha1.
 		if err := controllerutil.SetControllerReference(nc, &nn, r.Scheme); err != nil {
 			return err
 		}
-		if err := r.Create(ctx, &nn); err != nil && !apierrors.IsAlreadyExists(err) {
-			return err
+		if err := r.Create(ctx, &nn); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return err
+			}
+			// Lost a create race — re-Get so we hold a fresh object (with a
+			// resourceVersion) for the status update below.
+			if err := r.Get(ctx, types.NamespacedName{Name: objName, Namespace: nc.Namespace}, &nn); err != nil {
+				return err
+			}
 		}
 	case err != nil:
 		return err
+	}
+	// Sanitization collision: a DIFFERENT node's Name maps to this object name.
+	// Refuse to hijack the existing CR — surface DuplicateNodeName and skip
+	// driving/mirroring (design §3.1/§3.2).
+	if nn.Spec.NodeName != stub.Name {
+		setNodeCondition(&nn, nomadv1alpha1.NomadNodeCondReconciled, metav1.ConditionFalse, nomadv1alpha1.ReasonDuplicateNodeName, "another node's Name sanitizes to this object name")
+		return r.Status().Update(ctx, &nn)
 	}
 	// Drive desired state onto Nomad (Task 7 fills driveDesired), then mirror.
 	if err := r.driveDesired(ctx, &nn, stub, ops); err != nil {
@@ -909,7 +933,7 @@ func (r *NomadNodeReconciler) seedDrain(ctx context.Context, id string, ops Noma
 		return &nomadv1alpha1.NodeDrainSpec{} // presence only; deadline defaults in driveDesired
 	}
 	return &nomadv1alpha1.NodeDrainSpec{
-		Deadline:         metav1.Duration{Duration: node.DrainStrategy.Deadline},
+		Deadline:         &metav1.Duration{Duration: node.DrainStrategy.Deadline},
 		IgnoreSystemJobs: node.DrainStrategy.IgnoreSystemJobs,
 	}
 }
@@ -941,11 +965,32 @@ func (r *NomadNodeReconciler) mirrorStatus(ctx context.Context, nn *nomadv1alpha
 	return r.Status().Update(ctx, nn)
 }
 
+// markClusterNotReady flags every existing NomadNode of this cluster with
+// Reconciled=False/ClusterNotReady, leaving mirrored status untouched
+// (design §3.4): the cluster isn't listable, so the last-known status is kept.
+func (r *NomadNodeReconciler) markClusterNotReady(ctx context.Context, nc *nomadv1alpha1.NomadCluster) error {
+	var list nomadv1alpha1.NomadNodeList
+	if err := r.List(ctx, &list, client.InNamespace(nc.Namespace), client.MatchingLabels(names(nc).Labels())); err != nil {
+		return err
+	}
+	for i := range list.Items {
+		nn := &list.Items[i]
+		if nn.Spec.ClusterRef.Name != nc.Name {
+			continue
+		}
+		setNodeCondition(nn, nomadv1alpha1.NomadNodeCondReconciled, metav1.ConditionFalse, nomadv1alpha1.ReasonClusterNotReady, "referenced NomadCluster is not Ready")
+		if err := r.Status().Update(ctx, nn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // markDuplicates / pruneAbsent are filled in Tasks 6 and 8; no-op stubs here.
 func (r *NomadNodeReconciler) markDuplicates(_ context.Context, _ *nomadv1alpha1.NomadCluster, _ map[string]bool) error {
 	return nil
 }
-func (r *NomadNodeReconciler) pruneAbsent(_ context.Context, _ *nomadv1alpha1.NomadCluster, _ map[string]*api.NodeListStub) error {
+func (r *NomadNodeReconciler) pruneAbsent(_ context.Context, _ *nomadv1alpha1.NomadCluster, _ map[string]*api.NodeListStub, _ map[string]bool) error {
 	return nil
 }
 
@@ -962,9 +1007,13 @@ func (r *NomadNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.NewNomadClient == nil {
 		r.NewNomadClient = DefaultNomadNodeClientFactory
 	}
+	// The reflector's primary object is the cluster. A NomadNode event maps back
+	// to its cluster via clusterForNode (spec.clusterRef), which is a strict
+	// superset of what Owns(&NomadNode{}) would enqueue — so Owns is redundant
+	// and omitted (KISS). GC cascade needs only the ownerReference set at mint,
+	// not Owns.
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&nomadv1alpha1.NomadCluster{}). // primary object is the cluster
-		Owns(&nomadv1alpha1.NomadNode{}).   // minted CRs carry the cluster ownerRef
+		For(&nomadv1alpha1.NomadCluster{}).
 		Watches(&nomadv1alpha1.NomadNode{}, handler.EnqueueRequestsFromMapFunc(r.clusterForNode)).
 		Named("nomadnode").
 		Complete(r)
@@ -1032,9 +1081,11 @@ var _ = Describe("NomadNode reflector: disambiguation", func() {
 		Expect(k8s.Create(ctx, ns)).To(Succeed())
 		nc := readyCluster(ctx, ns.Name)
 
+		// Live stub FIRST, down straggler LAST: a naive last-wins bindNodes would
+		// pick the down straggler, so this test genuinely fails before the fix.
 		fake := &fakeNodeOps{list: []*api.NodeListStub{
-			{ID: "old", Name: "box", Status: "down", CreateIndex: 1},
 			{ID: "new", Name: "box", Status: "ready", SchedulingEligibility: "eligible", CreateIndex: 9},
+			{ID: "old", Name: "box", Status: "down", CreateIndex: 1},
 		}}
 		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
@@ -1073,7 +1124,7 @@ Add `"k8s.io/apimachinery/pkg/api/meta"` to the test imports.
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/controller/ -run TestControllers -v 2>&1 | grep -A3 disambiguation`
-Expected: FAIL — the `down` straggler binds last-wins (`box` may be `down`), and no `DuplicateNodeName` reason is set.
+Expected: FAIL — naive last-wins binds the down straggler (`box` → `down`, `NodeID=old`), and no `DuplicateNodeName` reason is set on the twins.
 
 - [ ] **Step 3: Replace `bindNodes` + implement `markDuplicates`** in `internal/controller/nomadnode_controller.go`:
 
@@ -1205,7 +1256,7 @@ var _ = Describe("NomadNode reflector: drive", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: "d1", Namespace: ns.Name},
 			Spec: nomadv1alpha1.NomadNodeSpec{
 				ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "d1",
-				Drain: &nomadv1alpha1.NodeDrainSpec{Deadline: metav1.Duration{Duration: time.Hour}},
+				Drain: &nomadv1alpha1.NodeDrainSpec{Deadline: &metav1.Duration{Duration: time.Hour}},
 			},
 		}
 		Expect(k8s.Create(ctx, nn)).To(Succeed())
@@ -1231,7 +1282,7 @@ var _ = Describe("NomadNode reflector: drive", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: "d2", Namespace: ns.Name},
 			Spec: nomadv1alpha1.NomadNodeSpec{
 				ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "d2",
-				Drain: &nomadv1alpha1.NodeDrainSpec{Deadline: metav1.Duration{Duration: time.Hour}},
+				Drain: &nomadv1alpha1.NodeDrainSpec{Deadline: &metav1.Duration{Duration: time.Hour}},
 			},
 		}
 		Expect(k8s.Create(ctx, nn)).To(Succeed())
@@ -1243,6 +1294,50 @@ var _ = Describe("NomadNode reflector: drive", func() {
 		Expect(fake.drainCalls).To(HaveLen(1))
 		Expect(fake.drainCalls[0].spec).NotTo(BeNil())
 		Expect(fake.drainCalls[0].markEligible).To(BeFalse())
+	})
+
+	It("does not re-issue while a drain is in progress", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-drain3-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		nn := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "d3", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadNodeSpec{
+				ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "d3",
+				Drain: &nomadv1alpha1.NodeDrainSpec{Deadline: &metav1.Duration{Duration: time.Hour}},
+			},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+		nn.Status.DrainObservedGeneration = nn.Generation // already issued this generation
+		Expect(k8s.Status().Update(ctx, nn)).To(Succeed())
+
+		fake := &fakeNodeOps{list: []*api.NodeListStub{
+			{ID: "d3id", Name: "d3", Status: "ready", SchedulingEligibility: "ineligible", Drain: true},
+		}}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.drainCalls).To(BeEmpty(), "in-progress drain must not re-issue (deadline would slide)")
+	})
+
+	It("cancels a drain when spec.drain is removed", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-cancel-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		// CR has no spec.drain, but Nomad reports the node still draining.
+		nn := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "cx1", Namespace: ns.Name},
+			Spec:       nomadv1alpha1.NomadNodeSpec{ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "cx1", Eligible: true},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+
+		fake := &fakeNodeOps{list: []*api.NodeListStub{{ID: "cx1id", Name: "cx1", Status: "ready", SchedulingEligibility: "ineligible", Drain: true}}}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.drainCalls).To(HaveLen(1))
+		Expect(fake.drainCalls[0].spec).To(BeNil(), "cancel passes a nil spec")
+		Expect(fake.drainCalls[0].markEligible).To(BeTrue(), "markEligible = spec.eligible (true)")
 	})
 })
 ```
@@ -1262,16 +1357,14 @@ const defaultDrainDeadline = time.Hour
 // so eligibility is only driven when no drain is desired.
 func (r *NomadNodeReconciler) driveDesired(ctx context.Context, nn *nomadv1alpha1.NomadNode, stub *api.NodeListStub, ops NomadNodeOps) error {
 	if nn.Spec.Drain != nil {
-		if drainSatisfied(nn, stub) {
-			return nil // converged
+		if drainHandledThisGeneration(nn, stub) {
+			return nil // in progress (converging) or complete (converged)
 		}
-		spec := &api.DrainSpec{
-			Deadline:         nn.Spec.Drain.Deadline.Duration,
-			IgnoreSystemJobs: nn.Spec.Drain.IgnoreSystemJobs,
+		deadline := defaultDrainDeadline
+		if nn.Spec.Drain.Deadline != nil {
+			deadline = nn.Spec.Drain.Deadline.Duration // explicit value, incl. 0 = no deadline
 		}
-		if spec.Deadline == 0 {
-			spec.Deadline = defaultDrainDeadline
-		}
+		spec := &api.DrainSpec{Deadline: deadline, IgnoreSystemJobs: nn.Spec.Drain.IgnoreSystemJobs}
 		if err := ops.UpdateDrain(ctx, stub.ID, spec, false); err != nil {
 			return err
 		}
@@ -1295,14 +1388,21 @@ func (r *NomadNodeReconciler) driveDesired(ctx context.Context, nn *nomadv1alpha
 	return nil
 }
 
-// drainSatisfied reports whether the node has completed the drain requested at
-// the current spec generation (design §3.3): drain removed, node ineligible,
-// last drain complete, and issued at this generation.
-func drainSatisfied(nn *nomadv1alpha1.NomadNode, stub *api.NodeListStub) bool {
-	return !stub.Drain &&
+// drainHandledThisGeneration reports whether the drain requested at the current
+// spec generation has already been issued and is either IN PROGRESS or COMPLETE
+// — in both cases UpdateDrain must NOT be re-issued. Re-issuing a running drain
+// restarts its relative deadline, so it would slide forever (design §3.3). A
+// drain cancelled out-of-band (Node.Drain==false with LastDrain != complete)
+// matches neither, so it is re-issued — spec wins.
+func drainHandledThisGeneration(nn *nomadv1alpha1.NomadNode, stub *api.NodeListStub) bool {
+	if nn.Status.DrainObservedGeneration != nn.Generation {
+		return false
+	}
+	inProgress := stub.Drain
+	complete := !stub.Drain &&
 		stub.SchedulingEligibility == api.NodeSchedulingIneligible &&
-		stub.LastDrain != nil && stub.LastDrain.Status == api.DrainStatusComplete &&
-		nn.Status.DrainObservedGeneration == nn.Generation
+		stub.LastDrain != nil && stub.LastDrain.Status == api.DrainStatusComplete
+	return inProgress || complete
 }
 ```
 
@@ -1312,14 +1412,13 @@ func drainSatisfied(nn *nomadv1alpha1.NomadNode, stub *api.NodeListStub) bool {
 	_ api.DrainStrategy
 ```
 
-and add a constant-pin `var` block (or extend the existing constant block):
+and add a constant pin (or extend the existing constant block):
 
 ```go
 	_ = api.DrainStatusComplete
-	_ = api.DrainStatusCanceled
 ```
 
-(Backed by real reads: `seedDrain` reads `node.DrainStrategy`; `drainSatisfied` reads `api.DrainStatusComplete`.)
+(Backed by real reads: `seedDrain` reads `node.DrainStrategy`; `drainHandledThisGeneration` reads `api.DrainStatusComplete`. `DrainStatusCanceled` is **not** pinned — the out-of-band-cancel path is the *absence* of in-progress/complete, so no code names that constant.)
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -1381,10 +1480,32 @@ var _ = Describe("NomadNode reflector: prune + cascade", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8s.Get(ctx, types.NamespacedName{Name: "keep", Namespace: ns.Name}, &nomadv1alpha1.NomadNode{})).To(Succeed(), "must survive a list error")
 	})
+
+	It("flags ClusterNotReady on existing nodes when the cluster is not Ready", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-notready-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		nn := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "stale", Namespace: ns.Name, Labels: names(nc).Labels()},
+			Spec:       nomadv1alpha1.NomadNodeSpec{ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "stale"},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+		nc.Status.Phase = nomadv1alpha1.PhaseDegraded // cluster drops out of Ready
+		Expect(k8s.Status().Update(ctx, nc)).To(Succeed())
+
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(&fakeNodeOps{})}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "stale", Namespace: ns.Name}, nn)).To(Succeed())
+		cond := meta.FindStatusCondition(nn.Status.Conditions, nomadv1alpha1.NomadNodeCondReconciled)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonClusterNotReady))
+	})
 })
 ```
 
-Add `"errors"` to the test imports.
+Add `"errors"` to the test imports (`"k8s.io/apimachinery/pkg/api/meta"` was already added in Task 6).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1398,9 +1519,14 @@ Expected: FAIL — `pruneAbsent` is a no-op, so `ghost` is not deleted.
 // from the successful list (Nomad GC'd them). It is only reached after a
 // successful ListNodes (the reconcile returns earlier on list error), so a
 // transient outage never prunes.
-func (r *NomadNodeReconciler) pruneAbsent(ctx context.Context, nc *nomadv1alpha1.NomadCluster, bound map[string]*api.NodeListStub) error {
+func (r *NomadNodeReconciler) pruneAbsent(ctx context.Context, nc *nomadv1alpha1.NomadCluster, bound map[string]*api.NodeListStub, dupes map[string]bool) error {
 	present := map[string]bool{}
 	for name := range bound {
+		present[sanitizeNodeName(name)] = true
+	}
+	for name := range dupes {
+		// markDuplicates created these CRs this pass; their nodes ARE present
+		// (just ambiguous), so they must not be pruned.
 		present[sanitizeNodeName(name)] = true
 	}
 	var list nomadv1alpha1.NomadNodeList
@@ -1478,8 +1604,12 @@ func TestRenderConfigNodeGCThreshold(t *testing.T) {
 	set := base.DeepCopy()
 	set.Spec.NodeGCThreshold = &metav1.Duration{Duration: 48 * time.Hour}
 	setBody, setHash := renderConfig(set, "1.2.3.4")
-	if !strings.Contains(setBody, `node_gc_threshold = "48h0m0s"`) {
-		t.Errorf("set: expected node_gc_threshold in body, got:\n%s", setBody)
+	// node_gc_threshold is a SERVER-stanza option — it must render INSIDE the
+	// server{} block, not at top level (Nomad rejects a top-level key).
+	serverStart := strings.Index(setBody, "server {")
+	serverEnd := strings.Index(setBody[serverStart:], "\n}\n") + serverStart
+	if serverStart < 0 || !strings.Contains(setBody[serverStart:serverEnd], `node_gc_threshold = "48h0m0s"`) {
+		t.Errorf("set: node_gc_threshold must render inside server{}, got:\n%s", setBody)
 	}
 	if setHash == unsetHash {
 		t.Error("setting node_gc_threshold must change the rollout hash")
@@ -1494,15 +1624,17 @@ Add `metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"`, `"strings"`, `"time"` to th
 Run: `go test ./internal/controller/ -run TestRenderConfigNodeGCThreshold -v`
 Expected: FAIL — body never contains `node_gc_threshold`.
 
-- [ ] **Step 4: Implement gated render** — in `internal/controller/config_render.go`, inside `renderConfig`, after the `server { ... }` block is written (after line 30) and before the `acl {` block, add:
+- [ ] **Step 4: Implement gated render inside the `server{}` block** — `node_gc_threshold` is a *server-stanza* option, so it must go **inside** `server { … }`, not at top level (Nomad rejects a top-level key). In `internal/controller/config_render.go`, replace the single server-block `Fprintf` (currently line 30) so it injects an optional `node_gc_threshold` line before the block closes:
 
 ```go
+	gcLine := ""
 	if nc.Spec.NodeGCThreshold != nil {
-		fmt.Fprintf(&b, "node_gc_threshold = %q\n\n", nc.Spec.NodeGCThreshold.Duration.String())
+		gcLine = fmt.Sprintf("  node_gc_threshold = %q\n", nc.Spec.NodeGCThreshold.Duration.String())
 	}
+	fmt.Fprintf(&b, "server {\n  enabled          = true\n  bootstrap_expect = %d\n%s  server_join {\n    retry_join = [%s]\n  }\n}\n\n", nc.Spec.Servers, gcLine, retryJoin)
 ```
 
-The rendered value is part of `body`, which already feeds the SHA-256 hash — so setting/changing it rolls the StatefulSet automatically; no separate hash change needed.
+The rendered value is part of `body`, which already feeds the SHA-256 hash (`config_render.go:35` hashes `body`) — so setting/changing it rolls the StatefulSet automatically; no separate hash change needed.
 
 - [ ] **Step 5: Regenerate + run tests**
 
@@ -1625,7 +1757,10 @@ git commit -m "test(nomad): live node eligibility/drain; wire reconciler + runbo
 
 ## Self-Review Checklist (completed by plan author)
 
-- **Spec coverage:** representation model + CRUD split (T3, T5); node identity/ephemeral-ID + sanitized name (T3, T4, T5); eligibility + drain composition with convergence (T7); reflector loop cluster-keyed (T5); disambiguation (T6); prune lifecycle incl. list-error safety + cascade (T8); clientFor extraction (T2); `internal/nomad` additions + pins backed by real calls (T1, T5, T7); optional `nodeGCThreshold` gated render (T9); W5 retirement (no code — nothing to build, verified in design); envtest with injected fake (T5–T8); integration + runbook (T10). All design §§1–10 map to a task.
+> **Amended 2026-07-13** after an independent sr-go-engineer *plan* review (Fable): C1 (eligible non-`omitempty`), C2 (`pruneAbsent` keeps `dupes`), C3 (`node_gc_threshold` rendered inside `server{}`), I1 (sanitization-collision guard in `upsertNode`), I2 (drain no-op while in progress — `drainHandledThisGeneration`), I3 (`ClusterNotReady` implemented + tested; hand-authored CRs / `NodeNotFound` deferred), I4 (drain-cancel test), I5 (disambiguation test ordered to fail first), I6 (`deadline` is `*metav1.Duration`), and minors M1–M9 all folded.
+
+- **Spec coverage:** representation model + CRUD split (T3, T5); node identity/ephemeral-ID + sanitized name + collision guard (T3, T4, T5); eligibility + drain composition with per-generation convergence (T7); reflector loop cluster-keyed (T5); disambiguation (T6); prune lifecycle incl. list-error safety, `dupes`-preservation, and cascade (T8); `ClusterNotReady` degradation (T5 code, T8 test); `clientFor` extraction (T2); `internal/nomad` additions + pins backed by real calls (T1, T5, T7); optional `nodeGCThreshold` gated render inside `server{}` (T9); W5 retirement (no code — verified in design); envtest with injected fake (T5–T8); integration + runbook (T10). All design §§1–10 map to a task.
 - **Placeholder scan:** no TBD/TODO; every code step shows complete code; the one deferred item (a missing `devAgentWithNode` integration helper) has explicit construction instructions.
-- **Type consistency:** `NomadNodeOps`, `NomadNodeClientFactory`, `bindNodes`, `upsertNode`, `driveDesired`, `drainSatisfied`, `pruneAbsent`, `sanitizeNodeName`, `clusterNomadConfig`, `setNodeCondition` used identically across tasks; `NodeDrainSpec.Deadline` is `metav1.Duration` throughout; contract pins (`ToggleEligibility`/`UpdateDrain`/`DrainSpec` in T1, `DrainMetadata` in T5, `DrainStrategy`/`DrainStatus*` in T7) each land in the task whose code backs them.
-- **Verify-at-plan-time carried from design §10:** confirm `node_gc_threshold` name/default (T9 assumes `server.node_gc_threshold`, built-in 24h); confirm `DrainSpec.Deadline` 0/negative encoding (T1/T7 use `0 → default 1h`); the generation-based drain issuance is exercised by T7's convergence specs; two controllers on `NomadCluster` is validated by T5's envtest actually running.
+- **Type consistency:** `NomadNodeOps`, `NomadNodeClientFactory`, `bindNodes`, `upsertNode(nc, stub, ops)`, `driveDesired`, `drainHandledThisGeneration`, `pruneAbsent(nc, bound, dupes)`, `markClusterNotReady`, `sanitizeNodeName`, `clusterNomadConfig`, `setNodeCondition` used identically across tasks; `NodeDrainSpec.Deadline` is `*metav1.Duration` throughout; contract pins (`ToggleEligibility`/`UpdateDrain`/`DrainSpec` in T1, `DrainMetadata` in T5, `DrainStrategy`/`DrainStatusComplete` in T7 — `DrainStatusCanceled` intentionally not pinned) each land in the task whose code backs them.
+- **Honest coverage caveats (corrected per review M6):** the dual-controller-on-`NomadCluster` wiring is exercised only at runtime (Task 10 / `cmd/main.go`) — the envtest specs call `Reconcile` directly, they do not run `SetupWithManager`; and the ownerRef **cascade** is asserted by the ownerReference's *presence* (Task 5), not by real garbage collection (envtest has no GC controller).
+- **Verify-at-plan-time carried from design §10:** confirm `node_gc_threshold` name/default (T9 assumes `server.node_gc_threshold`, built-in 24h) and that it is a `server{}`-stanza key; confirm `DrainSpec.Deadline` 0/negative encoding against real v2.0.4 (T7 treats nil→1h, explicit 0→no-deadline); generation-based issuance is exercised by T7's in-progress + converged specs.
