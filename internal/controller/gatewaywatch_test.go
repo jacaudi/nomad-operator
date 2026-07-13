@@ -15,9 +15,9 @@ import (
 // referencing the given Gateway by name/namespace.
 func existingModeCluster(name, ns, gwName, gwNS string) *nomadv1alpha1.NomadCluster {
 	nc := minimalCluster(name, ns)
-	nc.Spec.Gateway.Mode = nomadv1alpha1.GatewayModeExisting
-	nc.Spec.Gateway.ClassName = ""
-	nc.Spec.Gateway.Ref = &nomadv1alpha1.GatewayRef{Name: gwName, Namespace: gwNS}
+	nc.Spec.ExternalAccess.Gateway.Mode = nomadv1alpha1.GatewayModeExisting
+	nc.Spec.ExternalAccess.Gateway.ClassName = ""
+	nc.Spec.ExternalAccess.Gateway.Ref = &nomadv1alpha1.GatewayRef{Name: gwName, Namespace: gwNS}
 	return nc
 }
 

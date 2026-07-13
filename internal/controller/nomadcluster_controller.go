@@ -101,18 +101,18 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return r.finish(ctx, &nc, ctrl.Result{RequeueAfter: requeueShort})
 	}
 
-	// 2. Gateway: dispatches to Managed or Existing based on spec.gateway.mode.
+	// 2. Gateway: dispatches to Managed or Existing based on spec.externalAccess.gateway.mode.
 	gwAddr, gwReady, err := r.ensureGateway(ctx, &nc)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !gwReady {
 		nc.Status.Phase = nomadv1alpha1.PhasePending
-		setCondition(&nc, nomadv1alpha1.CondGatewayReady, metav1ConditionFalse, "WaitingForAddress", "gateway address not assigned")
+		setCondition(&nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionFalse, "WaitingForAddress", "gateway address not assigned")
 		return r.finish(ctx, &nc, ctrl.Result{RequeueAfter: requeueShort})
 	}
-	nc.Status.GatewayAddress = gwAddr
-	setCondition(&nc, nomadv1alpha1.CondGatewayReady, metav1ConditionTrue, "Assigned", "gateway address assigned")
+	nc.Status.ExternalAddress = gwAddr
+	setCondition(&nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionTrue, "Assigned", "gateway address assigned")
 
 	// 3. Render config + provision workloads.
 	_, configHash := renderConfig(&nc, gwAddr)
@@ -197,7 +197,7 @@ func (r *NomadClusterReconciler) clientFor(ctx context.Context, nc *nomadv1alpha
 
 // bootstrapAndReady waits for quorum via the injected client, runs the
 // idempotent ACL bootstrap, and advances the cluster to Ready. The gateway
-// address is already persisted to nc.Status.GatewayAddress by the caller
+// address is already persisted to nc.Status.ExternalAddress by the caller
 // before this runs, so the body below doesn't consume it directly; the
 // parameter is kept (blank) to match this method's documented interface
 // contract (task-8 brief).
@@ -241,10 +241,10 @@ func (r *NomadClusterReconciler) bootstrapAndReady(ctx context.Context, nc *noma
 const requeueSteady = 60 * time.Second
 
 // gatewayToClusters maps a watched Gateway to the NomadClusters that
-// reference it in Existing mode (spec.gateway.mode == Existing &&
-// spec.gateway.ref names this Gateway). Managed-mode Gateways are already
-// covered by Owns(&gwapiv1.Gateway{}) and never match here, since Managed
-// clusters have no spec.gateway.ref.
+// reference it in Existing mode (spec.externalAccess.gateway.mode == Existing &&
+// spec.externalAccess.gateway.ref names this Gateway). Managed-mode Gateways are
+// already covered by Owns(&gwapiv1.Gateway{}) and never match here, since Managed
+// clusters have no spec.externalAccess.gateway.ref.
 func (r *NomadClusterReconciler) gatewayToClusters(ctx context.Context, obj client.Object) []reconcile.Request {
 	var list nomadv1alpha1.NomadClusterList
 	if err := r.List(ctx, &list); err != nil {
@@ -252,8 +252,8 @@ func (r *NomadClusterReconciler) gatewayToClusters(ctx context.Context, obj clie
 	}
 	var reqs []reconcile.Request
 	for _, nc := range list.Items {
-		ref := nc.Spec.Gateway.Ref
-		if nc.Spec.Gateway.Mode != nomadv1alpha1.GatewayModeExisting || ref == nil {
+		ref := nc.Spec.ExternalAccess.Gateway.Ref
+		if nc.Spec.ExternalAccess.Gateway.Mode != nomadv1alpha1.GatewayModeExisting || ref == nil {
 			continue
 		}
 		if ref.Name == obj.GetName() && ref.Namespace == obj.GetNamespace() {

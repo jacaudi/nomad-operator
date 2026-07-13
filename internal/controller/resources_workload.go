@@ -23,7 +23,7 @@ func buildConfigMap(nc *nomadv1alpha1.NomadCluster, gatewayAddress string) *core
 	n := names(nc)
 	body, _ := renderConfig(nc, gatewayAddress)
 	var sb strings.Builder
-	for _, p := range nc.Spec.Gateway.RPCPorts {
+	for _, p := range rpcAdvertisePorts(nc) {
 		sb.WriteString(" ")
 		sb.WriteString(itoa(int(p)))
 	}

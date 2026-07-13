@@ -55,54 +55,96 @@ spec:
                 items:
                   type: string
                 type: array
-              gateway:
-                description: GatewaySpec configures the Gateway API resources fronting
-                  a NomadCluster.
+              externalAccess:
+                description: |-
+                  ExternalAccessSpec is a discriminated union selecting the external-access
+                  mechanism. gateway is set iff mode==Gateway; loadBalancer is optional and may
+                  be set only when mode==LoadBalancer.
                 properties:
-                  className:
-                    type: string
-                  httpHostname:
-                    type: string
-                  mode:
-                    default: Managed
-                    description: GatewayMode describes how the Gateway API resources
-                      for a NomadCluster are provisioned.
-                    enum:
-                    - Managed
-                    - Existing
-                    type: string
-                  ref:
-                    description: GatewayRef identifies a pre-existing Gateway API
-                      Gateway to attach routes to.
+                  gateway:
+                    description: GatewaySpec configures the Gateway API resources
+                      fronting a NomadCluster.
                     properties:
-                      name:
+                      className:
                         type: string
-                      namespace:
+                      httpHostname:
                         type: string
+                      mode:
+                        default: Managed
+                        description: GatewayMode describes how the Gateway API resources
+                          for a NomadCluster are provisioned.
+                        enum:
+                        - Managed
+                        - Existing
+                        type: string
+                      ref:
+                        description: GatewayRef identifies a pre-existing Gateway
+                          API Gateway to attach routes to.
+                        properties:
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - name
+                        - namespace
+                        type: object
+                      rpcPorts:
+                        description: RPCPorts is one L4 listener port per server;
+                          length must equal spec.servers.
+                        items:
+                          format: int32
+                          type: integer
+                        minItems: 1
+                        type: array
+                        x-kubernetes-validations:
+                        - message: rpcPorts is immutable
+                          rule: self == oldSelf
                     required:
-                    - name
-                    - namespace
+                    - httpHostname
+                    - rpcPorts
                     type: object
-                  rpcPorts:
-                    description: RPCPorts is one L4 listener port per server; length
-                      must equal spec.servers.
-                    items:
-                      format: int32
-                      type: integer
-                    minItems: 1
-                    type: array
                     x-kubernetes-validations:
-                    - message: rpcPorts is immutable
-                      rule: self == oldSelf
-                required:
-                - httpHostname
-                - rpcPorts
+                    - message: className is required when mode is Managed
+                      rule: self.mode != 'Managed' || has(self.className)
+                    - message: ref is required when mode is Existing
+                      rule: self.mode != 'Existing' || has(self.ref)
+                  loadBalancer:
+                    description: |-
+                      LoadBalancerSpec configures the type: LoadBalancer Service used in
+                      LoadBalancer external-access mode. Kept intentionally lean (KISS): cloud LB
+                      behavior is driven by annotations, which already cover static-IP requests.
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Annotations are applied verbatim to the LoadBalancer Service (cloud-LB
+                          config). Untyped by design.
+                        type: object
+                      loadBalancerClass:
+                        type: string
+                    type: object
+                  mode:
+                    default: Gateway
+                    description: |-
+                      ExternalAccessMode selects how a NomadCluster's control plane is exposed to
+                      out-of-cluster edge agents.
+                    enum:
+                    - Gateway
+                    - LoadBalancer
+                    type: string
                 type: object
                 x-kubernetes-validations:
-                - message: className is required when mode is Managed
-                  rule: self.mode != 'Managed' || has(self.className)
-                - message: ref is required when mode is Existing
-                  rule: self.mode != 'Existing' || has(self.ref)
+                - message: externalAccess.mode is immutable
+                  rule: self.mode == oldSelf.mode
+                - message: externalAccess.gateway is required when mode is Gateway
+                  rule: self.mode != 'Gateway' || has(self.gateway)
+                - message: externalAccess.gateway must be absent when mode is LoadBalancer
+                  rule: self.mode != 'LoadBalancer' || !has(self.gateway)
+                - message: externalAccess.loadBalancer must be absent when mode is
+                    Gateway
+                  rule: self.mode != 'Gateway' || !has(self.loadBalancer)
               image:
                 type: string
               region:
@@ -206,20 +248,24 @@ spec:
                     description: |-
                       CertSecretRef names a cert-manager-issued Secret (tls.crt, tls.key, ca.crt).
                       SANs must include server.<region>.nomad, client.<region>.nomad,
-                      spec.gateway.httpHostname, localhost, and 127.0.0.1.
+                      spec.externalAccess.gateway.httpHostname (Gateway mode), localhost, and 127.0.0.1.
                     type: string
                 required:
                 - certSecretRef
                 type: object
             required:
-            - gateway
+            - externalAccess
             - image
             - storage
             - tls
             type: object
             x-kubernetes-validations:
-            - message: gateway.rpcPorts length must equal servers
-              rule: size(self.gateway.rpcPorts) == self.servers
+            - message: externalAccess.gateway.rpcPorts length must equal servers
+              rule: self.externalAccess.mode != 'Gateway' || size(self.externalAccess.gateway.rpcPorts)
+                == self.servers
+            - message: 'LoadBalancer external-access mode requires servers: 1'
+              rule: self.externalAccess.mode != 'LoadBalancer' || self.servers ==
+                1
           status:
             description: status defines the observed state of NomadCluster
             properties:
@@ -286,7 +332,7 @@ spec:
                 x-kubernetes-list-type: map
               endpoint:
                 type: string
-              gatewayAddress:
+              externalAddress:
                 type: string
               gossipKeySecretRef:
                 type: string

@@ -31,10 +31,10 @@ func buildManagedGateway(nc *nomadv1alpha1.NomadCluster) *gwapiv1.Gateway {
 		Name:     listenerNameHTTP,
 		Port:     gwapiv1.PortNumber(portHTTP),
 		Protocol: gwapiv1.TLSProtocolType,
-		Hostname: ptrHostname(nc.Spec.Gateway.HTTPHostname),
+		Hostname: ptrHostname(nc.Spec.ExternalAccess.Gateway.HTTPHostname),
 		TLS:      &gwapiv1.GatewayTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)},
 	}}
-	for ordinal, p := range nc.Spec.Gateway.RPCPorts {
+	for ordinal, p := range nc.Spec.ExternalAccess.Gateway.RPCPorts {
 		listeners = append(listeners, gwapiv1.Listener{
 			Name:     gwapiv1.SectionName(listenerNameRPC(ordinal)),
 			Port:     gwapiv1.PortNumber(p),
@@ -44,7 +44,7 @@ func buildManagedGateway(nc *nomadv1alpha1.NomadCluster) *gwapiv1.Gateway {
 	return &gwapiv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{Name: n.Gateway, Namespace: nc.Namespace, Labels: n.Labels()},
 		Spec: gwapiv1.GatewaySpec{
-			GatewayClassName: gwapiv1.ObjectName(nc.Spec.Gateway.ClassName),
+			GatewayClassName: gwapiv1.ObjectName(nc.Spec.ExternalAccess.Gateway.ClassName),
 			Listeners:        listeners,
 		},
 	}
@@ -56,9 +56,9 @@ func parentGateway(nc *nomadv1alpha1.NomadCluster) gwapiv1.ParentReference {
 	n := names(nc)
 	gwName := n.Gateway
 	gwNs := gwapiv1.Namespace(nc.Namespace)
-	if nc.Spec.Gateway.Mode == nomadv1alpha1.GatewayModeExisting && nc.Spec.Gateway.Ref != nil {
-		gwName = nc.Spec.Gateway.Ref.Name
-		gwNs = gwapiv1.Namespace(nc.Spec.Gateway.Ref.Namespace)
+	if nc.Spec.ExternalAccess.Gateway.Mode == nomadv1alpha1.GatewayModeExisting && nc.Spec.ExternalAccess.Gateway.Ref != nil {
+		gwName = nc.Spec.ExternalAccess.Gateway.Ref.Name
+		gwNs = gwapiv1.Namespace(nc.Spec.ExternalAccess.Gateway.Ref.Namespace)
 	}
 	return gwapiv1.ParentReference{
 		Group:     new(gwapiv1.Group("gateway.networking.k8s.io")),
@@ -78,7 +78,7 @@ func buildTLSRoute(nc *nomadv1alpha1.NomadCluster) *gwapiv1a2.TLSRoute {
 		ObjectMeta: metav1.ObjectMeta{Name: n.TLSRoute, Namespace: nc.Namespace, Labels: n.Labels()},
 		Spec: gwapiv1a2.TLSRouteSpec{
 			CommonRouteSpec: gwapiv1.CommonRouteSpec{ParentRefs: []gwapiv1.ParentReference{parent}},
-			Hostnames:       []gwapiv1.Hostname{gwapiv1.Hostname(nc.Spec.Gateway.HTTPHostname)},
+			Hostnames:       []gwapiv1.Hostname{gwapiv1.Hostname(nc.Spec.ExternalAccess.Gateway.HTTPHostname)},
 			Rules: []gwapiv1a2.TLSRouteRule{{BackendRefs: []gwapiv1.BackendRef{{
 				BackendObjectReference: gwapiv1.BackendObjectReference{Name: gwapiv1.ObjectName(n.APISvc), Port: ptrPortNumber(portHTTP)},
 			}}}},
@@ -130,25 +130,25 @@ func (r *NomadClusterReconciler) ensureManagedGateway(ctx context.Context, nc *n
 }
 
 // ensureGateway dispatches to the Managed or Existing gateway path based on
-// spec.gateway.mode. Route application (buildTLSRoute/buildTCPRoutes) is
+// spec.externalAccess.gateway.mode. Route application (buildTLSRoute/buildTCPRoutes) is
 // unchanged for both modes — parentGateway already resolves to the operator's
 // own Gateway (Managed) or the referenced one (Existing).
 func (r *NomadClusterReconciler) ensureGateway(ctx context.Context, nc *nomadv1alpha1.NomadCluster) (string, bool, error) {
-	if nc.Spec.Gateway.Mode == nomadv1alpha1.GatewayModeExisting {
+	if nc.Spec.ExternalAccess.Gateway.Mode == nomadv1alpha1.GatewayModeExisting {
 		return r.ensureExistingGateway(ctx, nc)
 	}
 	return r.ensureManagedGateway(ctx, nc)
 }
 
 // ensureExistingGateway verifies the user-owned Gateway referenced by
-// spec.gateway.ref: it must exist, carry a listener for the HTTP hostname and
+// spec.externalAccess.gateway.ref: it must exist, carry a listener for the HTTP hostname and
 // one TCP listener per RPC port, and admit the CR's namespace via
 // allowedRoutes on those listeners. It never creates or mutates the Gateway —
 // the user owns it. Returns ready=false (never an error) for any of those
 // verification failures so the reconciler surfaces GatewayReady=False rather
 // than treating a misconfigured shared Gateway as a hard error.
 func (r *NomadClusterReconciler) ensureExistingGateway(ctx context.Context, nc *nomadv1alpha1.NomadCluster) (string, bool, error) {
-	ref := nc.Spec.Gateway.Ref
+	ref := nc.Spec.ExternalAccess.Gateway.Ref
 	var gw gwapiv1.Gateway
 	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: ref.Namespace}, &gw); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -169,11 +169,11 @@ func (r *NomadClusterReconciler) ensureExistingGateway(ctx context.Context, nc *
 	}
 	httpListener, ok := byName[listenerNameHTTP]
 	if !ok || httpListener.Protocol != gwapiv1.TLSProtocolType ||
-		httpListener.Hostname == nil || string(*httpListener.Hostname) != nc.Spec.Gateway.HTTPHostname ||
+		httpListener.Hostname == nil || string(*httpListener.Hostname) != nc.Spec.ExternalAccess.Gateway.HTTPHostname ||
 		!listenerAdmitsNamespace(httpListener, gw.Namespace, nc.Namespace) {
 		return "", false, nil
 	}
-	for ordinal, p := range nc.Spec.Gateway.RPCPorts {
+	for ordinal, p := range nc.Spec.ExternalAccess.Gateway.RPCPorts {
 		l, ok := byName[gwapiv1.SectionName(listenerNameRPC(ordinal))]
 		if !ok || l.Protocol != gwapiv1.TCPProtocolType || int32(l.Port) != p ||
 			!listenerAdmitsNamespace(l, gw.Namespace, nc.Namespace) {

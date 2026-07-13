@@ -38,7 +38,7 @@ func TestManagedGatewayListeners(t *testing.T) {
 	rpcListeners := gw.Spec.Listeners[1:]
 	seenPorts := make(map[gwapiv1.PortNumber]bool, len(rpcListeners))
 	for ordinal, l := range rpcListeners {
-		wantPort := gwapiv1.PortNumber(nc.Spec.Gateway.RPCPorts[ordinal])
+		wantPort := gwapiv1.PortNumber(nc.Spec.ExternalAccess.Gateway.RPCPorts[ordinal])
 		if l.Port != wantPort {
 			t.Errorf("rpc listener[%d] port = %d, want %d", ordinal, l.Port, wantPort)
 		}
@@ -134,9 +134,9 @@ var _ = Describe("Existing gateway mode", func() {
 		Expect(k8s.Status().Update(ctx, shared)).To(Succeed())
 
 		nc := minimalCluster("prod", ns)
-		nc.Spec.Gateway.Mode = nomadv1alpha1.GatewayModeExisting
-		nc.Spec.Gateway.ClassName = ""
-		nc.Spec.Gateway.Ref = &nomadv1alpha1.GatewayRef{Name: "shared-gw", Namespace: ns}
+		nc.Spec.ExternalAccess.Gateway.Mode = nomadv1alpha1.GatewayModeExisting
+		nc.Spec.ExternalAccess.Gateway.ClassName = ""
+		nc.Spec.ExternalAccess.Gateway.Ref = &nomadv1alpha1.GatewayRef{Name: "shared-gw", Namespace: ns}
 		Expect(k8s.Create(ctx, nc)).To(Succeed())
 
 		fake := &fakeNomad{leader: "10.0.0.9:14647", serverHealthy: true}
@@ -163,14 +163,14 @@ var _ = Describe("Existing gateway mode", func() {
 		shared.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: "10.0.0.9"}}
 		Expect(k8s.Status().Update(ctx, shared)).To(Succeed())
 		nc := minimalCluster("prod", ns)
-		nc.Spec.Gateway = nomadv1alpha1.GatewaySpec{Mode: nomadv1alpha1.GatewayModeExisting, Ref: &nomadv1alpha1.GatewayRef{Name: "shared-gw", Namespace: ns}, RPCPorts: []int32{14647, 24647, 34647}, HTTPHostname: "nomad.example.com"}
+		nc.Spec.ExternalAccess = nomadv1alpha1.ExternalAccessSpec{Mode: nomadv1alpha1.ExternalAccessGateway, Gateway: &nomadv1alpha1.GatewaySpec{Mode: nomadv1alpha1.GatewayModeExisting, Ref: &nomadv1alpha1.GatewayRef{Name: "shared-gw", Namespace: ns}, RPCPorts: []int32{14647, 24647, 34647}, HTTPHostname: "nomad.example.com"}}
 		Expect(k8s.Create(ctx, nc)).To(Succeed())
 		fake := &fakeNomad{}
 		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
 		reconcileOnce(r, "prod", ns)
 		var got nomadv1alpha1.NomadCluster
 		Expect(k8s.Get(ctx, types.NamespacedName{Name: "prod", Namespace: ns}, &got)).To(Succeed())
-		Expect(meta_IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.CondGatewayReady)).To(BeFalse())
+		Expect(meta_IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.CondExternalAccessReady)).To(BeFalse())
 	})
 
 	It("sets GatewayReady=False when a listener has the right port but the wrong name", func() {
@@ -188,14 +188,14 @@ var _ = Describe("Existing gateway mode", func() {
 		Expect(k8s.Status().Update(ctx, shared)).To(Succeed())
 
 		nc := minimalCluster("prod", ns)
-		nc.Spec.Gateway = nomadv1alpha1.GatewaySpec{Mode: nomadv1alpha1.GatewayModeExisting, Ref: &nomadv1alpha1.GatewayRef{Name: "shared-gw", Namespace: ns}, RPCPorts: []int32{14647, 24647, 34647}, HTTPHostname: "nomad.example.com"}
+		nc.Spec.ExternalAccess = nomadv1alpha1.ExternalAccessSpec{Mode: nomadv1alpha1.ExternalAccessGateway, Gateway: &nomadv1alpha1.GatewaySpec{Mode: nomadv1alpha1.GatewayModeExisting, Ref: &nomadv1alpha1.GatewayRef{Name: "shared-gw", Namespace: ns}, RPCPorts: []int32{14647, 24647, 34647}, HTTPHostname: "nomad.example.com"}}
 		Expect(k8s.Create(ctx, nc)).To(Succeed())
 		fake := &fakeNomad{}
 		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
 		reconcileOnce(r, "prod", ns)
 		var got nomadv1alpha1.NomadCluster
 		Expect(k8s.Get(ctx, types.NamespacedName{Name: "prod", Namespace: ns}, &got)).To(Succeed())
-		Expect(meta_IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.CondGatewayReady)).To(BeFalse())
+		Expect(meta_IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.CondExternalAccessReady)).To(BeFalse())
 	})
 
 	// Not part of the task-9 brief's Step 1 snippet, but required by the task's
@@ -225,13 +225,13 @@ var _ = Describe("Existing gateway mode", func() {
 		Expect(k8s.Status().Update(ctx, shared)).To(Succeed())
 
 		nc := minimalCluster("prod", crNs)
-		nc.Spec.Gateway = nomadv1alpha1.GatewaySpec{Mode: nomadv1alpha1.GatewayModeExisting, Ref: &nomadv1alpha1.GatewayRef{Name: "shared-gw", Namespace: gwNs}, RPCPorts: []int32{14647, 24647, 34647}, HTTPHostname: "nomad.example.com"}
+		nc.Spec.ExternalAccess = nomadv1alpha1.ExternalAccessSpec{Mode: nomadv1alpha1.ExternalAccessGateway, Gateway: &nomadv1alpha1.GatewaySpec{Mode: nomadv1alpha1.GatewayModeExisting, Ref: &nomadv1alpha1.GatewayRef{Name: "shared-gw", Namespace: gwNs}, RPCPorts: []int32{14647, 24647, 34647}, HTTPHostname: "nomad.example.com"}}
 		Expect(k8s.Create(ctx, nc)).To(Succeed())
 		fake := &fakeNomad{}
 		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
 		reconcileOnce(r, "prod", crNs)
 		var got nomadv1alpha1.NomadCluster
 		Expect(k8s.Get(ctx, types.NamespacedName{Name: "prod", Namespace: crNs}, &got)).To(Succeed())
-		Expect(meta_IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.CondGatewayReady)).To(BeFalse())
+		Expect(meta_IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.CondExternalAccessReady)).To(BeFalse())
 	})
 })

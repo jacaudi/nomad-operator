@@ -25,7 +25,7 @@ func TestGatewayModeConstants(t *testing.T) {
 }
 
 func TestConditionTypeConstants(t *testing.T) {
-	for _, c := range []string{CondReconciled, CondGatewayReady, CondQuorumHealthy, CondACLBootstrapped, CondReady} {
+	for _, c := range []string{CondReconciled, CondExternalAccessReady, CondQuorumHealthy, CondACLBootstrapped, CondReady} {
 		if c == "" {
 			t.Fatal("empty condition type constant")
 		}

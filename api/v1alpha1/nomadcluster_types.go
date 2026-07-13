@@ -44,11 +44,11 @@ const (
 
 // Condition types.
 const (
-	CondReconciled      = "Reconciled"
-	CondGatewayReady    = "GatewayReady"
-	CondQuorumHealthy   = "QuorumHealthy"
-	CondACLBootstrapped = "ACLBootstrapped"
-	CondReady           = "Ready"
+	CondReconciled          = "Reconciled"
+	CondExternalAccessReady = "ExternalAccessReady"
+	CondQuorumHealthy       = "QuorumHealthy"
+	CondACLBootstrapped     = "ACLBootstrapped"
+	CondReady               = "Ready"
 )
 
 // StorageSpec configures the persistent volume claims for Nomad server data.
@@ -63,7 +63,7 @@ type StorageSpec struct {
 type TLSSpec struct {
 	// CertSecretRef names a cert-manager-issued Secret (tls.crt, tls.key, ca.crt).
 	// SANs must include server.<region>.nomad, client.<region>.nomad,
-	// spec.gateway.httpHostname, localhost, and 127.0.0.1.
+	// spec.externalAccess.gateway.httpHostname (Gateway mode), localhost, and 127.0.0.1.
 	// +kubebuilder:validation:Required
 	CertSecretRef string `json:"certSecretRef"`
 }
@@ -96,9 +96,53 @@ type GatewaySpec struct {
 	HTTPHostname string `json:"httpHostname"`
 }
 
+// ExternalAccessMode selects how a NomadCluster's control plane is exposed to
+// out-of-cluster edge agents.
+type ExternalAccessMode string
+
+const (
+	// ExternalAccessGateway exposes the control plane via Gateway API objects
+	// (one Gateway, per-server RPC listeners). Supports servers 1/3/5.
+	ExternalAccessGateway ExternalAccessMode = "Gateway"
+	// ExternalAccessLoadBalancer exposes a single-node control plane via one
+	// type: LoadBalancer Service (north-south only; scoped to servers: 1).
+	ExternalAccessLoadBalancer ExternalAccessMode = "LoadBalancer"
+)
+
+// LoadBalancerSpec configures the type: LoadBalancer Service used in
+// LoadBalancer external-access mode. Kept intentionally lean (KISS): cloud LB
+// behavior is driven by annotations, which already cover static-IP requests.
+type LoadBalancerSpec struct {
+	// +optional
+	LoadBalancerClass string `json:"loadBalancerClass,omitempty"`
+	// Annotations are applied verbatim to the LoadBalancer Service (cloud-LB
+	// config). Untyped by design.
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+// ExternalAccessSpec is a discriminated union selecting the external-access
+// mechanism. gateway is set iff mode==Gateway; loadBalancer is optional and may
+// be set only when mode==LoadBalancer.
+//
+// +kubebuilder:validation:XValidation:rule="self.mode == oldSelf.mode",message="externalAccess.mode is immutable"
+// +kubebuilder:validation:XValidation:rule="self.mode != 'Gateway' || has(self.gateway)",message="externalAccess.gateway is required when mode is Gateway"
+// +kubebuilder:validation:XValidation:rule="self.mode != 'LoadBalancer' || !has(self.gateway)",message="externalAccess.gateway must be absent when mode is LoadBalancer"
+// +kubebuilder:validation:XValidation:rule="self.mode != 'Gateway' || !has(self.loadBalancer)",message="externalAccess.loadBalancer must be absent when mode is Gateway"
+type ExternalAccessSpec struct {
+	// +kubebuilder:validation:Enum=Gateway;LoadBalancer
+	// +kubebuilder:default=Gateway
+	Mode ExternalAccessMode `json:"mode,omitempty"`
+	// +optional
+	Gateway *GatewaySpec `json:"gateway,omitempty"`
+	// +optional
+	LoadBalancer *LoadBalancerSpec `json:"loadBalancer,omitempty"`
+}
+
 // NomadClusterSpec defines the desired state of NomadCluster
 //
-// +kubebuilder:validation:XValidation:rule="size(self.gateway.rpcPorts) == self.servers",message="gateway.rpcPorts length must equal servers"
+// +kubebuilder:validation:XValidation:rule="self.externalAccess.mode != 'Gateway' || size(self.externalAccess.gateway.rpcPorts) == self.servers",message="externalAccess.gateway.rpcPorts length must equal servers"
+// +kubebuilder:validation:XValidation:rule="self.externalAccess.mode != 'LoadBalancer' || self.servers == 1",message="LoadBalancer external-access mode requires servers: 1"
 type NomadClusterSpec struct {
 	// +kubebuilder:validation:Required
 	Image string `json:"image"`
@@ -123,7 +167,7 @@ type NomadClusterSpec struct {
 	// +kubebuilder:validation:Required
 	TLS TLSSpec `json:"tls"`
 	// +kubebuilder:validation:Required
-	Gateway GatewaySpec `json:"gateway"`
+	ExternalAccess ExternalAccessSpec `json:"externalAccess"`
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 }
@@ -147,7 +191,7 @@ type NomadClusterStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// +optional
-	GatewayAddress string `json:"gatewayAddress,omitempty"`
+	ExternalAddress string `json:"externalAddress,omitempty"`
 	// +optional
 	Members []MemberStatus `json:"members,omitempty"`
 	// +optional

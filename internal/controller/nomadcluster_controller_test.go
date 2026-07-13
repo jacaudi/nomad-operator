@@ -25,9 +25,12 @@ func minimalCluster(name, ns string) *nomadv1alpha1.NomadCluster {
 			Servers: 3,
 			Storage: nomadv1alpha1.StorageSpec{Size: "1Gi"},
 			TLS:     nomadv1alpha1.TLSSpec{CertSecretRef: "nomad-tls"},
-			Gateway: nomadv1alpha1.GatewaySpec{
-				Mode: nomadv1alpha1.GatewayModeManaged, ClassName: "cilium",
-				RPCPorts: []int32{14647, 24647, 34647}, HTTPHostname: "nomad.example.com",
+			ExternalAccess: nomadv1alpha1.ExternalAccessSpec{
+				Mode: nomadv1alpha1.ExternalAccessGateway,
+				Gateway: &nomadv1alpha1.GatewaySpec{
+					Mode: nomadv1alpha1.GatewayModeManaged, ClassName: "cilium",
+					RPCPorts: []int32{14647, 24647, 34647}, HTTPHostname: "nomad.example.com",
+				},
 			},
 		},
 	}
@@ -43,9 +46,12 @@ func singleServerCluster(name, ns string) *nomadv1alpha1.NomadCluster {
 			Servers: 1,
 			Storage: nomadv1alpha1.StorageSpec{Size: "1Gi"},
 			TLS:     nomadv1alpha1.TLSSpec{CertSecretRef: "nomad-tls"},
-			Gateway: nomadv1alpha1.GatewaySpec{
-				Mode: nomadv1alpha1.GatewayModeManaged, ClassName: "cilium",
-				RPCPorts: []int32{14647}, HTTPHostname: "nomad.example.com",
+			ExternalAccess: nomadv1alpha1.ExternalAccessSpec{
+				Mode: nomadv1alpha1.ExternalAccessGateway,
+				Gateway: &nomadv1alpha1.GatewaySpec{
+					Mode: nomadv1alpha1.GatewayModeManaged, ClassName: "cilium",
+					RPCPorts: []int32{14647}, HTTPHostname: "nomad.example.com",
+				},
 			},
 		},
 	}
@@ -88,8 +94,47 @@ var _ = Describe("NomadCluster reconcile skeleton", func() {
 		ctx := context.Background()
 		nc := minimalCluster("even", "default")
 		nc.Spec.Servers = 2
-		nc.Spec.Gateway.RPCPorts = []int32{14647, 24647}
+		nc.Spec.ExternalAccess.Gateway.RPCPorts = []int32{14647, 24647}
 		Expect(k8s.Create(ctx, nc)).NotTo(Succeed())
+	})
+
+	It("rejects LoadBalancer mode with servers: 3 (LB requires servers: 1)", func() {
+		ctx := context.Background()
+		nc := minimalCluster("lb-multi", "default")
+		nc.Spec.Servers = 3
+		nc.Spec.ExternalAccess = nomadv1alpha1.ExternalAccessSpec{
+			Mode:         nomadv1alpha1.ExternalAccessLoadBalancer,
+			LoadBalancer: &nomadv1alpha1.LoadBalancerSpec{},
+		}
+		Expect(k8s.Create(ctx, nc)).NotTo(Succeed())
+	})
+
+	It("accepts LoadBalancer mode with servers: 1 and no gateway block", func() {
+		ctx := context.Background()
+		nc := singleServerCluster("lb-single", "default")
+		nc.Spec.ExternalAccess = nomadv1alpha1.ExternalAccessSpec{
+			Mode:         nomadv1alpha1.ExternalAccessLoadBalancer,
+			LoadBalancer: &nomadv1alpha1.LoadBalancerSpec{},
+		}
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+	})
+
+	It("rejects a gateway block set under LoadBalancer mode (union exclusivity)", func() {
+		ctx := context.Background()
+		nc := singleServerCluster("lb-badunion", "default")
+		nc.Spec.ExternalAccess = nomadv1alpha1.ExternalAccessSpec{
+			Mode:    nomadv1alpha1.ExternalAccessLoadBalancer,
+			Gateway: &nomadv1alpha1.GatewaySpec{Mode: nomadv1alpha1.GatewayModeManaged, ClassName: "cilium", RPCPorts: []int32{14647}, HTTPHostname: "nomad.example.com"},
+		}
+		Expect(k8s.Create(ctx, nc)).NotTo(Succeed())
+	})
+
+	It("rejects mutation of the immutable externalAccess.mode field", func() {
+		ctx := context.Background()
+		nc := singleServerCluster("mode-immut", "default")
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+		nc.Spec.ExternalAccess.Mode = nomadv1alpha1.ExternalAccessLoadBalancer
+		Expect(k8s.Update(ctx, nc)).NotTo(Succeed())
 	})
 })
 

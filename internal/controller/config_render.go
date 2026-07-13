@@ -32,8 +32,14 @@ func renderConfig(nc *nomadv1alpha1.NomadCluster, gatewayAddress string) (string
 	b.WriteString("tls {\n  http = true\n  rpc  = true\n  ca_file   = \"/nomad/tls/ca.crt\"\n  cert_file = \"/nomad/tls/tls.crt\"\n  key_file  = \"/nomad/tls/tls.key\"\n  verify_server_hostname = true\n  verify_https_client    = true\n}\n")
 
 	body := b.String()
-	sum := sha256.Sum256([]byte(body + "|gw=" + gatewayAddress + "|ports=" + fmt.Sprint(nc.Spec.Gateway.RPCPorts)))
+	sum := sha256.Sum256([]byte(body + "|gw=" + gatewayAddress + "|ports=" + fmt.Sprint(rpcAdvertisePorts(nc))))
 	return body, hex.EncodeToString(sum[:])
+}
+
+// rpcAdvertisePorts returns the per-ordinal RPC advertise ports for the active
+// external-access mode. Gateway mode uses the user's gateway.rpcPorts.
+func rpcAdvertisePorts(nc *nomadv1alpha1.NomadCluster) []int32 {
+	return nc.Spec.ExternalAccess.Gateway.RPCPorts
 }
 
 func firstOr(in []string, def string) string {
