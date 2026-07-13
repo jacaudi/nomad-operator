@@ -30,6 +30,7 @@ var (
 	_ api.WriteOptions
 	_ api.WriteMeta
 	_ api.UnexpectedResponseError
+	_ api.DrainSpec
 )
 
 // Method / constructor signature pins (method expressions; receiver never evaluated).
@@ -45,6 +46,8 @@ var (
 	_ = (*api.Agent).Health
 	_ = (*api.Status).Leader
 	_ = (*api.ACLTokens).BootstrapOpts
+	_ = (*api.Nodes).ToggleEligibility
+	_ = (*api.Nodes).UpdateDrain
 	_ = (*api.QueryOptions).WithContext
 	_ = (*api.WriteOptions).WithContext
 	_ = api.UnexpectedResponseError.StatusCode

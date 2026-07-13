@@ -114,3 +114,20 @@ func (c *Client) ACLBootstrap(ctx context.Context, bootstrapToken string) (strin
 	}
 	return tok.SecretID, nil
 }
+
+// SetEligibility toggles a node's scheduling eligibility (Nomad's cordon knob).
+func (c *Client) SetEligibility(ctx context.Context, nodeID string, eligible bool) error {
+	if _, err := c.api.Nodes().ToggleEligibility(nodeID, eligible, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+		return fmt.Errorf("nomad: set eligibility %q: %w", nodeID, err)
+	}
+	return nil
+}
+
+// UpdateDrain sets or cancels a node's drain. A nil spec cancels an active
+// drain; markEligible marks the node eligible when canceling.
+func (c *Client) UpdateDrain(ctx context.Context, nodeID string, spec *api.DrainSpec, markEligible bool) error {
+	if _, err := c.api.Nodes().UpdateDrain(nodeID, spec, markEligible, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+		return fmt.Errorf("nomad: update drain %q: %w", nodeID, err)
+	}
+	return nil
+}

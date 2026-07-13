@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/hashicorp/nomad/api"
 )
 
 // fakeNomad serves the minimal endpoints the Client reads.
@@ -77,5 +80,11 @@ func TestWriteMethodSignaturesErrorWithoutServer(t *testing.T) {
 	}
 	if _, err := c.ACLBootstrap(ctx, "3b5e0f0a-8c1e-4c2a-9f3a-1d2e3f4a5b6c"); err == nil {
 		t.Error("ACLBootstrap() with no server: want error, got nil")
+	}
+	if err := c.SetEligibility(ctx, "abc123", false); err == nil {
+		t.Error("SetEligibility() with no server: want error, got nil")
+	}
+	if err := c.UpdateDrain(ctx, "abc123", &api.DrainSpec{Deadline: time.Hour}, false); err == nil {
+		t.Error("UpdateDrain() with no server: want error, got nil")
 	}
 }
