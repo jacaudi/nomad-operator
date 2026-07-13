@@ -399,3 +399,70 @@ docker run --rm --privileged --cgroupns=host -v "$PWD":/src -w /src \
 
 On a host with a native `nomad` v2.0.4 binary on `PATH`, `make test-integration` runs the
 same test directly; without a `nomad` binary it skips cleanly.
+
+## 8. External access modes
+
+`spec.externalAccess.mode` selects how the control plane is exposed to
+out-of-cluster clients:
+
+| Mode | `servers` | Exposure | External objects |
+|---|---|---|---|
+| `Gateway` (default) | 1, 3, or 5 | One RPC listener per server behind a Gateway (`TLSRoute` + per-ordinal `TCPRoute`s), addressed by `status.gatewayAddress` | Gateway, `TLSRoute`, per-pod `Service`s, `TCPRoute`s |
+| `LoadBalancer` | **1 only** | A single `type: LoadBalancer` Service in front of the lone server | `<name>-lb` Service |
+
+`LoadBalancer` mode is single-VIP and **north-south only**: with `servers: 1`
+there is no east-west Raft quorum to serve, so a single VIP suffices. It is
+rejected (by CEL) for any multi-server cluster — a 3- or 5-server cluster
+needs the Gateway's per-server RPC listeners for inter-server Raft.
+
+### 8.1 LoadBalancer provisioning and the `Pending` gate
+
+`LoadBalancer` mode provisions exactly one Service named `<name>-lb`
+(`type: LoadBalancer`) exposing RPC `4647` and HTTP `4646`, selecting the
+single server pod directly. It provisions **no** Gateway, per-pod Services,
+or routes.
+
+The cluster stays `Pending` (condition `ExternalAccessReady=False` /
+`WaitingForAddress`) until the LB provider assigns
+`status.loadBalancer.ingress` on that Service — the operator reads the
+assigned IP/hostname from there and advertises it as `status.externalAddress`.
+This is the **same failure shape as a missing Gateway controller** (§1.3): a
+`type: LoadBalancer` Service needs something to fulfil it — a cloud load
+balancer, MetalLB, or Cilium LBIPAM. Without one, the Service never gets an
+ingress address and reconcile stalls at `WaitingForAddress` indefinitely.
+
+Verify the assigned address:
+
+```bash
+kubectl get svc <name>-lb -n <ns> -o jsonpath='{.status.loadBalancer.ingress}'
+kubectl get nomadcluster <name> -n <ns> -o jsonpath='{.status.externalAddress}'
+```
+
+### 8.2 HTTP/UI over the LoadBalancer needs `-tls-server-name`
+
+Nomad RPC is **role-verified**: the server presents `server.<region>.nomad`
+and clients verify that embedded role/region name, not the dialed address. So
+an edge agent joins over the LB address on `4647` with **no extra flag** — the
+same as Gateway mode (§2).
+
+Nomad HTTP, however, is **address-verified**: the CLI/UI verifies the
+certificate against the address it dialed, and the LB address is **not** in
+the cert SANs (§1.1). So HTTP/UI access over the LB address requires overriding
+the expected server name:
+
+```bash
+nomad status -address=https://<externalAddress>:4646 \
+  -tls-server-name server.<region>.nomad
+# or: export NOMAD_TLS_SERVER_NAME=server.<region>.nomad
+```
+
+The operator's own in-cluster client is **unaffected** — it dials the
+in-cluster API Service and already sets `TLSServerName = server.<region>.nomad`
+(`internal/controller/nomadcluster_controller.go`).
+
+### 8.3 Immutability
+
+Both `spec.externalAccess.mode` and `spec.servers` are immutable (enforced by
+CEL). A cluster cannot switch modes in place, and because `servers` is fixed, a
+3- or 5-server cluster can **never** become `LoadBalancer` — the mode is
+decided once, at creation.

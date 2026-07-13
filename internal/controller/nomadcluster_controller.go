@@ -101,22 +101,29 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return r.finish(ctx, &nc, ctrl.Result{RequeueAfter: requeueShort})
 	}
 
-	// 2. Gateway: dispatches to Managed or Existing based on spec.externalAccess.gateway.mode.
-	gwAddr, gwReady, err := r.ensureGateway(ctx, &nc)
+	// 2. External access: resolve the advertised address for the active mode.
+	var extAddr string
+	var extReady bool
+	switch nc.Spec.ExternalAccess.Mode {
+	case nomadv1alpha1.ExternalAccessLoadBalancer:
+		extAddr, extReady, err = r.ensureLoadBalancer(ctx, &nc)
+	default:
+		extAddr, extReady, err = r.ensureGateway(ctx, &nc)
+	}
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !gwReady {
+	if !extReady {
 		nc.Status.Phase = nomadv1alpha1.PhasePending
-		setCondition(&nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionFalse, "WaitingForAddress", "gateway address not assigned")
+		setCondition(&nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionFalse, "WaitingForAddress", "external address not assigned")
 		return r.finish(ctx, &nc, ctrl.Result{RequeueAfter: requeueShort})
 	}
-	nc.Status.ExternalAddress = gwAddr
-	setCondition(&nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionTrue, "Assigned", "gateway address assigned")
+	nc.Status.ExternalAddress = extAddr
+	setCondition(&nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionTrue, "Assigned", "external address assigned")
 
 	// 3. Render config + provision workloads.
-	_, configHash := renderConfig(&nc, gwAddr)
-	if err := r.apply(ctx, &nc, buildConfigMap(&nc, gwAddr)); err != nil {
+	_, configHash := renderConfig(&nc, extAddr)
+	if err := r.apply(ctx, &nc, buildConfigMap(&nc, extAddr)); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.apply(ctx, &nc, buildHeadlessService(&nc)); err != nil {
@@ -125,17 +132,21 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err := r.apply(ctx, &nc, buildAPIService(&nc)); err != nil {
 		return ctrl.Result{}, err
 	}
-	for ordinal := range int(nc.Spec.Servers) {
-		if err := r.apply(ctx, &nc, buildPodService(&nc, ordinal)); err != nil {
+	// Gateway-only: per-pod RPC Services + routes. LoadBalancer mode selects the
+	// server pod directly through the LB Service and needs none of these.
+	if nc.Spec.ExternalAccess.Mode == nomadv1alpha1.ExternalAccessGateway {
+		for ordinal := range int(nc.Spec.Servers) {
+			if err := r.apply(ctx, &nc, buildPodService(&nc, ordinal)); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		if err := r.apply(ctx, &nc, buildTLSRoute(&nc)); err != nil {
 			return ctrl.Result{}, err
 		}
-	}
-	if err := r.apply(ctx, &nc, buildTLSRoute(&nc)); err != nil {
-		return ctrl.Result{}, err
-	}
-	for _, rt := range buildTCPRoutes(&nc) {
-		if err := r.apply(ctx, &nc, rt); err != nil {
-			return ctrl.Result{}, err
+		for _, rt := range buildTCPRoutes(&nc) {
+			if err := r.apply(ctx, &nc, rt); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 	}
 	if err := r.apply(ctx, &nc, buildStatefulSet(&nc, configHash)); err != nil {
@@ -151,7 +162,7 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if nc.Status.Phase == nomadv1alpha1.PhasePending || nc.Status.Phase == "" {
 		nc.Status.Phase = nomadv1alpha1.PhaseBootstrapping
 	}
-	return r.bootstrapAndReady(ctx, &nc, gwAddr)
+	return r.bootstrapAndReady(ctx, &nc, extAddr)
 }
 
 // finish persists status and returns the given Result.
