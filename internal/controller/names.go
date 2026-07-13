@@ -21,6 +21,7 @@ type resourceNames struct {
 	GossipSecret string
 	TokenSecret  string
 	TLSRoute     string
+	LBService    string
 }
 
 func names(nc *nomadv1alpha1.NomadCluster) resourceNames {
@@ -37,6 +38,7 @@ func names(nc *nomadv1alpha1.NomadCluster) resourceNames {
 		GossipSecret: nc.Name + "-nomad-gossip-key",
 		TokenSecret:  nc.Name + "-nomad-bootstrap-token",
 		TLSRoute:     apiSvc + "-tls",
+		LBService:    nc.Name + "-lb",
 	}
 }
 

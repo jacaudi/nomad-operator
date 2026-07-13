@@ -29,6 +29,21 @@ func TestRenderConfigDeterministicHash(t *testing.T) {
 	_ = hcl2
 }
 
+func TestRpcAdvertisePortsLoadBalancerMode(t *testing.T) {
+	nc := lbCluster("edge", "nomad-system")
+	got := rpcAdvertisePorts(nc)
+	if len(got) != 1 || got[0] != 4647 {
+		t.Errorf("rpcAdvertisePorts(LB) = %v, want [4647]", got)
+	}
+	// renderConfig must not panic on a nil gateway block in LB mode, and its
+	// hash must fold in the LB address (so an LB-IP change rolls the pods).
+	_, h1 := renderConfig(nc, "203.0.113.7")
+	_, h2 := renderConfig(nc, "203.0.113.9")
+	if h1 == h2 {
+		t.Error("hash unchanged when LB address changed")
+	}
+}
+
 // TestRenderConfigSingleServerBootstrapExpect guards FR-1: a servers=1
 // control plane renders bootstrap_expect=1, so Raft bootstraps immediately
 // without waiting to see peers.

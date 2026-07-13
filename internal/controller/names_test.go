@@ -33,3 +33,10 @@ func TestNamesDeterministic(t *testing.T) {
 		t.Errorf("TCPRoute(2) = %q, want %q", n.TCPRoute(2), "prod-rpc-2")
 	}
 }
+
+func TestLBServiceName(t *testing.T) {
+	nc := singleServerCluster("edge", "nomad-system")
+	if got := names(nc).LBService; got != "edge-lb" {
+		t.Errorf("LBService = %q, want %q", got, "edge-lb")
+	}
+}

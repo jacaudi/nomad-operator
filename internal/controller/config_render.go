@@ -37,8 +37,15 @@ func renderConfig(nc *nomadv1alpha1.NomadCluster, gatewayAddress string) (string
 }
 
 // rpcAdvertisePorts returns the per-ordinal RPC advertise ports for the active
-// external-access mode. Gateway mode uses the user's gateway.rpcPorts.
+// external-access mode. Gateway mode uses the user's gateway.rpcPorts;
+// LoadBalancer mode (servers: 1) synthesizes the single canonical RPC port and
+// never touches the nil gateway block. This is the single source of the per-mode
+// RPC-port decision — both buildConfigMap and the renderConfig rollout hash call
+// it, so neither inlines the port.
 func rpcAdvertisePorts(nc *nomadv1alpha1.NomadCluster) []int32 {
+	if nc.Spec.ExternalAccess.Mode == nomadv1alpha1.ExternalAccessLoadBalancer {
+		return []int32{portRPC}
+	}
 	return nc.Spec.ExternalAccess.Gateway.RPCPorts
 }
 

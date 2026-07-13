@@ -252,11 +252,11 @@ func (r *NomadClusterReconciler) gatewayToClusters(ctx context.Context, obj clie
 	}
 	var reqs []reconcile.Request
 	for _, nc := range list.Items {
-		ref := nc.Spec.ExternalAccess.Gateway.Ref
-		if nc.Spec.ExternalAccess.Gateway.Mode != nomadv1alpha1.GatewayModeExisting || ref == nil {
+		gw := nc.Spec.ExternalAccess.Gateway
+		if gw == nil || gw.Mode != nomadv1alpha1.GatewayModeExisting || gw.Ref == nil {
 			continue
 		}
-		if ref.Name == obj.GetName() && ref.Namespace == obj.GetNamespace() {
+		if gw.Ref.Name == obj.GetName() && gw.Ref.Namespace == obj.GetNamespace() {
 			reqs = append(reqs, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: nc.Namespace},
 			})

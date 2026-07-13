@@ -33,10 +33,11 @@ func TestGatewayToClusters(t *testing.T) {
 	referencer := existingModeCluster("referencer", "default", "shared-gw", "default")
 	otherGateway := existingModeCluster("other-gateway", "default", "different-gw", "default")
 	managed := minimalCluster("managed", "default") // Managed mode, no ref
+	lb := lbCluster("lb-edge", "default")           // LoadBalancer mode: ExternalAccess.Gateway == nil
 
 	c := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(referencer, otherGateway, managed).
+		WithObjects(referencer, otherGateway, managed, lb).
 		Build()
 	r := &NomadClusterReconciler{Client: c, Scheme: s}
 
