@@ -3,6 +3,11 @@ package controller
 import (
 	"strings"
 	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
 )
 
 func TestRenderConfigDeterministicHash(t *testing.T) {
@@ -41,6 +46,41 @@ func TestRpcAdvertisePortsLoadBalancerMode(t *testing.T) {
 	_, h2 := renderConfig(nc, "203.0.113.9")
 	if h1 == h2 {
 		t.Error("hash unchanged when LB address changed")
+	}
+}
+
+// TestRenderConfigNodeGCThreshold guards the optional server-stanza
+// node_gc_threshold: it renders nothing when unset, and renders INSIDE the
+// server{} block (not at top level, which Nomad rejects) when set. Setting it
+// must also change the rollout hash so the StatefulSet rolls.
+func TestRenderConfigNodeGCThreshold(t *testing.T) {
+	base := &nomadv1alpha1.NomadCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
+		Spec: nomadv1alpha1.NomadClusterSpec{
+			Servers: 1, Region: "global",
+			ExternalAccess: nomadv1alpha1.ExternalAccessSpec{
+				Mode:    nomadv1alpha1.ExternalAccessGateway,
+				Gateway: &nomadv1alpha1.GatewaySpec{Mode: nomadv1alpha1.GatewayModeManaged, RPCPorts: []int32{14647}, HTTPHostname: "h"},
+			},
+		},
+	}
+	unsetBody, unsetHash := renderConfig(base, "1.2.3.4")
+	if strings.Contains(unsetBody, "node_gc_threshold") {
+		t.Error("unset: node_gc_threshold must not render")
+	}
+
+	set := base.DeepCopy()
+	set.Spec.NodeGCThreshold = &metav1.Duration{Duration: 48 * time.Hour}
+	setBody, setHash := renderConfig(set, "1.2.3.4")
+	// node_gc_threshold is a SERVER-stanza option — it must render INSIDE the
+	// server{} block, not at top level (Nomad rejects a top-level key).
+	serverStart := strings.Index(setBody, "server {")
+	serverEnd := strings.Index(setBody[serverStart:], "\n}\n") + serverStart
+	if serverStart < 0 || !strings.Contains(setBody[serverStart:serverEnd], `node_gc_threshold = "48h0m0s"`) {
+		t.Errorf("set: node_gc_threshold must render inside server{}, got:\n%s", setBody)
+	}
+	if setHash == unsetHash {
+		t.Error("setting node_gc_threshold must change the rollout hash")
 	}
 }
 

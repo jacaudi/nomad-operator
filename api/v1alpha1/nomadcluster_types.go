@@ -162,6 +162,13 @@ type NomadClusterSpec struct {
 	Region string `json:"region,omitempty"`
 	// +kubebuilder:default={"dc1"}
 	Datacenters []string `json:"datacenters,omitempty"`
+	// NodeGCThreshold sets the servers' node_gc_threshold — how long a node
+	// must stay in a terminal (down) state before Nomad garbage-collects it.
+	// Optional with NO default: when unset, the operator emits nothing and
+	// Nomad uses its built-in default (24h). The NomadNode reflector's
+	// down-node retention window tracks whatever this resolves to.
+	// +optional
+	NodeGCThreshold *metav1.Duration `json:"nodeGCThreshold,omitempty"`
 	// +kubebuilder:validation:Required
 	Storage StorageSpec `json:"storage"`
 	// +kubebuilder:validation:Required

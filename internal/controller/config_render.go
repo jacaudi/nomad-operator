@@ -27,7 +27,14 @@ func renderConfig(nc *nomadv1alpha1.NomadCluster, gatewayAddress string) (string
 	fmt.Fprintf(&b, "datacenter = %q\n", firstOr(nc.Spec.Datacenters, "dc1"))
 	b.WriteString("data_dir   = \"/var/lib/nomad\"\n")
 	b.WriteString("bind_addr  = \"0.0.0.0\"\n\n")
-	fmt.Fprintf(&b, "server {\n  enabled          = true\n  bootstrap_expect = %d\n  server_join {\n    retry_join = [%s]\n  }\n}\n\n", nc.Spec.Servers, retryJoin)
+	// node_gc_threshold is a server-stanza option, so it renders INSIDE the
+	// server{} block. Optional with no default: nil emits nothing and Nomad
+	// uses its built-in 24h.
+	gcLine := ""
+	if nc.Spec.NodeGCThreshold != nil {
+		gcLine = fmt.Sprintf("  node_gc_threshold = %q\n", nc.Spec.NodeGCThreshold.Duration.String())
+	}
+	fmt.Fprintf(&b, "server {\n  enabled          = true\n  bootstrap_expect = %d\n%s  server_join {\n    retry_join = [%s]\n  }\n}\n\n", nc.Spec.Servers, gcLine, retryJoin)
 	b.WriteString("acl {\n  enabled = true\n}\n\n")
 	b.WriteString("tls {\n  http = true\n  rpc  = true\n  ca_file   = \"/nomad/tls/ca.crt\"\n  cert_file = \"/nomad/tls/tls.crt\"\n  key_file  = \"/nomad/tls/tls.key\"\n  verify_server_hostname = true\n  verify_https_client    = true\n}\n")
 

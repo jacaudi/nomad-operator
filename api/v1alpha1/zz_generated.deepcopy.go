@@ -252,6 +252,11 @@ func (in *NomadClusterSpec) DeepCopyInto(out *NomadClusterSpec) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.NodeGCThreshold != nil {
+		in, out := &in.NodeGCThreshold, &out.NodeGCThreshold
+		*out = new(v1.Duration)
+		**out = **in
+	}
 	out.Storage = in.Storage
 	out.TLS = in.TLS
 	in.ExternalAccess.DeepCopyInto(&out.ExternalAccess)
