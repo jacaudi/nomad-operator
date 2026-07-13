@@ -178,30 +178,9 @@ func (r *NomadClusterReconciler) finish(ctx context.Context, nc *nomadv1alpha1.N
 // cert-manager Secret (never files), and the token, if bootstrapped, comes
 // from the token Secret.
 func (r *NomadClusterReconciler) clientFor(ctx context.Context, nc *nomadv1alpha1.NomadCluster) (NomadOps, error) {
-	n := names(nc)
-	endpoint := fmt.Sprintf("https://%s.%s.svc:%d", n.APISvc, nc.Namespace, portHTTP)
-
-	var certSec corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Name: nc.Spec.TLS.CertSecretRef, Namespace: nc.Namespace}, &certSec); err != nil {
+	cfg, err := clusterNomadConfig(ctx, r.Client, nc)
+	if err != nil {
 		return nil, err
-	}
-	// The operator holds PEM bytes (from the Secret), not files, so it uses the
-	// *PEM fields added to nomad.TLSConfig in Step 4a.
-	cfg := nomad.Config{
-		Address:       endpoint,
-		Region:        nc.Spec.Region,
-		TLSServerName: "server." + nc.Spec.Region + ".nomad",
-		TLS: nomad.TLSConfig{
-			CACertPEM:     certSec.Data["ca.crt"],
-			ClientCertPEM: certSec.Data["tls.crt"],
-			ClientKeyPEM:  certSec.Data["tls.key"],
-		},
-	}
-
-	// Token, if bootstrapped.
-	var tokenSec corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Name: names(nc).TokenSecret, Namespace: nc.Namespace}, &tokenSec); err == nil {
-		cfg.Token = string(tokenSec.Data["token"])
 	}
 	return r.NewNomadClient(cfg)
 }
