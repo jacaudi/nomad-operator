@@ -5,7 +5,9 @@
 
 Follows slice 2 (NomadCluster HA control plane, merged `a1e4d6a`), FR-1 (single-node `servers: 1`, `349f5cc`), and the external-access-modes follow-up (merged `b91df1a`). This is the first CRD that *manages* an existing cluster rather than *provisioning* one.
 
-> **Amended 2026-07-12** after an independent sr-go-engineer design review (Fable), verdict *amend-before-planning*. The review verified the core representation model, the eligibility/drain composition at terminal states, the prune rules, the W5 retirement, and the YAGNI cuts as sound; the amendments fix targeted correctness gaps it surfaced — drain-completion convergence (§3.3, was a re-drain-forever bug), re-registration duplicate-Name handling (§3.2), the cluster-keyed reflector contract (§3.2, the previous `For(&NomadNode{})` shape could not mint first CRs), the `NodeListStub`-has-no-`DrainStrategy` seed fix (§3.2), the `clientFor` shared-config extraction (§4, "verbatim reuse" was impossible), CR-name sanitization (§3.1/§3.2), an ownerReference for cluster-delete GC (§3.1/§3.4), and dropping the meta-mirror contradiction (§7). `nodeGCThreshold` is now **optional with no default** (§5). Every domain claim below is grounded in `go doc` against the pinned api or Nomad docs.
+> **Amended 2026-07-12 (twice).** First after an independent sr-go-engineer *design* review (Fable), then again after an independent sr-go-engineer *plan* review (Fable) surfaced three design-level refinements folded back here: (§3.3) drain issuance is gated to **at most once per `spec.drain` generation** — re-issuing a still-running drain slides its relative deadline forever, so "in progress at this generation" is now a no-op, not a re-issue; (§3.1) `spec.drain.deadline` is a **`*metav1.Duration`** so an explicit `0` (no-deadline) is distinguishable from unset (→1h), and `spec.eligible` is **non-`omitempty`** so a seeded `false` is not clobbered by its `default=true`; (§3.4) hand-authored CRs are **out of scope for v1** and `NodeNotFound` is deferred, while `ClusterNotReady` is implemented on the cluster's nodes.
+>
+> **Original amendment,** verdict *amend-before-planning*. The review verified the core representation model, the eligibility/drain composition at terminal states, the prune rules, the W5 retirement, and the YAGNI cuts as sound; the amendments fix targeted correctness gaps it surfaced — drain-completion convergence (§3.3, was a re-drain-forever bug), re-registration duplicate-Name handling (§3.2), the cluster-keyed reflector contract (§3.2, the previous `For(&NomadNode{})` shape could not mint first CRs), the `NodeListStub`-has-no-`DrainStrategy` seed fix (§3.2), the `clientFor` shared-config extraction (§4, "verbatim reuse" was impossible), CR-name sanitization (§3.1/§3.2), an ownerReference for cluster-delete GC (§3.1/§3.4), and dropping the meta-mirror contradiction (§7). `nodeGCThreshold` is now **optional with no default** (§5). Every domain claim below is grounded in `go doc` against the pinned api or Nomad docs.
 
 ---
 
@@ -82,7 +84,7 @@ spec:
   nodeName: truenas-01          # EXACT Nomad node Name this CR represents (match key)
   eligible: true                # +kubebuilder:default=true — eligibility when NOT draining
   drain:                        # OPTIONAL — presence = drain, absence = don't/cancel
-    deadline: 1h                # metav1.Duration; default 1h; maps to DrainSpec.Deadline
+    deadline: 1h                # *metav1.Duration; nil→1h default, explicit 0→no deadline
     ignoreSystemJobs: true      # maps to DrainSpec.IgnoreSystemJobs
 status:
   nodeID: a1b2c3d4-…            # resolved ephemeral Nomad node ID
@@ -107,8 +109,8 @@ status:
 
 - **CR key = the node `Name`, sanitized.** The exact Nomad `Name` lives in `spec.nodeName` and is the reflector's match key; `metadata.name` is a **sanitized** form (lowercased, illegal runes replaced, length-capped to RFC 1123 subdomain) because Nomad Names default to the client hostname and may contain characters illegal in a Kubernetes object name. Referencing by ID was rejected: a re-registered box would silently become a *different* `NomadNode`, orphaning the old one. The ephemeral `nodeID` lives in `status`, re-resolved from the `List` every reconcile. Post-sanitization name collisions are handled by the same disambiguation guard as duplicate Names (§3.2).
 - **`clusterRef`** names a `NomadCluster` in the same namespace. `NomadNode` CRs are always co-located with their cluster (the reflector creates them there) and carry an **ownerReference to that `NomadCluster`** so Kubernetes GC cascades on cluster delete (§3.4).
-- **`spec.eligible`** (`+kubebuilder:default=true`) is the eligibility target *when the node is not actively draining* (see §3.3). The default covers hand-authored CRs; the reflector seeds it from observed state at mint.
-- **`spec.drain`** is an optional block mirroring `api.DrainSpec`. Presence ⇒ drain; absence ⇒ no drain (cancel any active drain). `deadline` is a `metav1.Duration` (K8s convention, not a bare string), defaulting to `1h` (the `nomad node drain` CLI default). `deadline > 0` force-stops stragglers after that long; `deadline: 0` drains gracefully with no deadline. The `-force`/immediate variant is deferred (would be an additive `force: bool` or negative-deadline encoding later).
+- **`spec.eligible`** (`+kubebuilder:default=true`, **not** `omitempty`) is the eligibility target *when the node is not actively draining* (see §3.3). The default covers a hand-omitted field on create; because the field is non-`omitempty`, the operator's seeded value — including a deliberate `false` for an observed-ineligible node — is always sent on the wire and never clobbered by the default. The reflector seeds it from observed state at mint.
+- **`spec.drain`** is an optional block mirroring `api.DrainSpec`. Presence ⇒ drain; absence ⇒ no drain (cancel any active drain). `deadline` is a **`*metav1.Duration`** (a pointer, so "unset" and an explicit `0` are distinguishable): `nil` ⇒ the operator substitutes the `1h` default (the `nomad node drain` CLI default); an explicit value is used verbatim, where `> 0` force-stops stragglers after that long and `0` drains gracefully with **no** deadline. The `-force`/immediate variant is deferred (would be an additive `force: bool` or negative-deadline encoding later).
 - **No `phase` enum.** Nomad's own `status` field *is* the node-health axis; a parallel operator phase would duplicate it. The "desired applied" axis is the `Reconciled` condition instead (the ripsheet's two-axis Reconciled-vs-health split, §5 of `idea.md`).
 - **Status style:** new `status` fields follow the existing `nomadcluster_types.go` conventions (`+optional`, `omitzero`).
 - **Printer columns:** `NAME`, `CLUSTER` (`spec.clusterRef.name`), `STATUS` (`status.status`), `ELIGIBLE` (`status.schedulingEligibility`), `DRAINING` (`status.draining`), `AGE`.
@@ -142,14 +144,14 @@ Each pass, for a cluster in `Ready` phase (an un-`Ready`/unreachable cluster is 
 
 `spec.eligible` and `spec.drain` are independent user knobs whose interaction mirrors how `UpdateDrain`'s `markEligible` actually behaves — and, critically, drain must **converge** (a drain is a one-shot process; naive "drain desired ⇒ call UpdateDrain every pass" would re-issue forever, churning Raft and flapping status, because after completion the observed `DrainStrategy` is `nil` and never equals the desired spec).
 
-Define **drain-satisfied** for the current `spec.drain` generation:
+The key insight is that `UpdateDrain` must be issued **at most once per `spec.drain` generation**. `DrainSpec.Deadline` is *relative to the drain's start time*, so re-issuing a still-running drain every resync restarts its clock — the deadline slides forever and never fires, on top of a Raft write per pass. So issuance is gated on the generation, not on whether the drain has finished. Define, for a `spec.drain` that is present:
 
-> `Node.Drain == false && SchedulingEligibility == ineligible && LastDrain.Status == complete`, and `status.drainObservedGeneration == metadata.generation`.
+> **already-handled-this-generation** ⇔ `status.drainObservedGeneration == metadata.generation` **and** the node is either *in progress* (`Node.Drain == true`) **or** *complete* (`Node.Drain == false && SchedulingEligibility == ineligible && LastDrain.Status == complete`).
 
 Reconcile rule:
 
-- **`spec.drain` present and *not* satisfied** → `UpdateDrain(id, drainSpec, markEligible=false)`; record `status.drainObservedGeneration = metadata.generation`. The node is forced **ineligible** while draining and allocations migrate. `spec.eligible` is dormant during an active drain (the API enforces ineligibility). A user editing `spec.drain.deadline` bumps `metadata.generation`, so the drain is intentionally re-issued; an out-of-band CLI *cancel* flips `LastDrain.Status` to `canceled` → unsatisfied → re-issued (spec wins).
-- **`spec.drain` present and satisfied** → no call (converged).
+- **`spec.drain` present and already-handled-this-generation** → **no call** (in progress → converging; complete → converged).
+- **`spec.drain` present and *not* already-handled** → `UpdateDrain(id, drainSpec, markEligible=false)`; record `status.drainObservedGeneration = metadata.generation`. This fires exactly once for a new/edited drain (a `deadline` edit bumps `metadata.generation`), and again if the drain was cancelled out-of-band (`Node.Drain == false` with `LastDrain.Status == canceled` matches neither in-progress nor complete → re-issued, spec wins). The node is forced **ineligible** while draining; `spec.eligible` is dormant during an active drain (the API enforces ineligibility).
 - **`spec.drain` removed** (node was draining) → cancel with `UpdateDrain(id, nil, markEligible=spec.eligible)` → the node returns to the eligibility the user asked for.
 - **No drain** → reconcile eligibility straight to `spec.eligible` via `ToggleEligibility(id, spec.eligible)` (compare-before-write; only call on mismatch).
 
@@ -170,9 +172,10 @@ CR existence tracks Nomad's node registry:
 **Down-node retention window** = the cluster's effective `node_gc_threshold` (§5), automatically: because prune is driven by *absence from List*, not an operator-side timer, the CR for a down box lingers exactly as long as Nomad keeps the node before GC. No operator-side retention state is invented (that would be precisely the drift the representation model avoids).
 
 **Degradation / conditions:**
-- `clusterRef` not `Ready` / unreachable → `Reconciled=False, reason=ClusterNotReady`; requeue; existing `status` left stale (last-known), never wiped.
-- `DuplicateNodeName` (§3.2) — two or more non-`down` stubs share a Name.
-- `NodeNotFound` — a hand-authored CR whose `spec.nodeName` never appears in a successful List. (Reflector-created CRs for GC'd nodes are pruned, not left in this state.)
+- `clusterRef` not `Ready` / unreachable → the reflector sets `Reconciled=False, reason=ClusterNotReady` on each of that cluster's existing `NomadNode` CRs, and requeues; existing `status` is left stale (last-known), never wiped.
+- `DuplicateNodeName` (§3.2) — two or more non-`down` stubs share a Name (after sanitization).
+
+**Hand-authored CRs are out of scope for v1.** `NomadNode` is an operator-authored representation (you Read+Update; the reflector Creates+Deletes), so a user hand-writing a `NomadNode` that points at a nonexistent node is not a supported flow. The reflector reconciles only its own labelled CRs; a hand-authored CR is ignored (neither driven nor pruned). A `NodeNotFound`-style condition for that case is deliberately deferred (YAGNI) — add it only if hand-authoring turns out to be a real need.
 
 **Teardown / finalizer: none.** Deleting a CR never touches the real node — prune-delete happens *because* the node is already gone, cascade-delete is Kubernetes GC, and a user-delete just re-mirrors next poll. There is no finalizer, and **deleting a `NomadNode` never drains or deregisters** the edge box. Draining is `spec.drain`; deregistering is Nomad's own GC — neither is tied to CR deletion.
 
@@ -203,7 +206,7 @@ The pin rule (from Foundation): only pin symbols the operator's own code names o
 
 - **Method pins** (each exercised by a real call in `Client.SetEligibility`/`UpdateDrain`): `(*api.Nodes).ToggleEligibility`, `(*api.Nodes).UpdateDrain`. Their signatures already cover the `NodeEligibilityUpdateResponse`/`NodeDrainUpdateResponse` return types.
 - **Type pins** (named directly in our code): `api.DrainSpec` (`Client.UpdateDrain` parameter); `api.DrainMetadata` (read from `node.LastDrain` for `status.lastDrain`); `api.DrainStrategy` (read from `Nodes().Info` for the actively-draining-at-mint seed, §3.2 step 4).
-- **Constant pins** (read by the drain-convergence predicate, §3.3): `api.DrainStatusComplete`, `api.DrainStatusCanceled` (and `DrainStatusDraining` as the set is used).
+- **Constant pins** (read by the drain-convergence predicate, §3.3): `api.DrainStatusComplete` (the only `DrainStatus` value the code names — the out-of-band-cancel path is the *absence* of in-progress/complete, so it reads no `Canceled` constant).
 - **Already pinned** (Foundation/slice 2), reused here: `(*api.Nodes).List`, `(*api.Nodes).Info`, `api.Node`, `api.NodeListStub`, `api.NodeStatusInit/Ready/Down/Disconnected`, `api.NodeSchedulingEligible/Ineligible`.
 - **Not pinned:** `Purge`, `ForceEvaluate`, `GC`, `Identity` — prune deletes the *Kubernetes CR* (never the Nomad node) and the imperative actions are out of scope. Pinning a symbol we don't call would reintroduce the existence-only-pin risk.
 
