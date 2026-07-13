@@ -15,6 +15,7 @@ type fakeNodeOps struct {
 	list       []*api.NodeListStub
 	info       map[string]*api.Node
 	listErr    error
+	eligErr    map[string]error // node ID -> error SetEligibility returns for it
 	eligCalls  []eligCall
 	drainCalls []drainCall
 }
@@ -37,7 +38,7 @@ func (f *fakeNodeOps) NodeInfo(_ context.Context, id string) (*api.Node, error) 
 }
 func (f *fakeNodeOps) SetEligibility(_ context.Context, id string, eligible bool) error {
 	f.eligCalls = append(f.eligCalls, eligCall{id, eligible})
-	return nil
+	return f.eligErr[id]
 }
 func (f *fakeNodeOps) UpdateDrain(_ context.Context, id string, spec *api.DrainSpec, markEligible bool) error {
 	f.drainCalls = append(f.drainCalls, drainCall{id, spec, markEligible})

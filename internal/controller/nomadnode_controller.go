@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/hashicorp/nomad/api"
@@ -64,15 +65,23 @@ func (r *NomadNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	bound, dupes := bindNodes(stubs)
+	// One node's failure must not stall the whole cluster's reflection: keep the
+	// failed stub in bound (so pruneAbsent won't delete a healthy CR), accumulate
+	// its error, and still run markDuplicates + pruneAbsent. A non-nil joined
+	// error is returned so genuinely-transient per-node failures still retry.
+	var errs []error
 	for _, stub := range bound {
 		if err := r.upsertNode(ctx, &nc, stub, ops); err != nil {
-			return ctrl.Result{}, err
+			errs = append(errs, err)
 		}
 	}
 	if err := r.markDuplicates(ctx, &nc, dupes); err != nil {
-		return ctrl.Result{}, err
+		errs = append(errs, err)
 	}
 	if err := r.pruneAbsent(ctx, &nc, bound, dupes); err != nil {
+		errs = append(errs, err)
+	}
+	if err := errors.Join(errs...); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: nodeResync}, nil
@@ -290,8 +299,15 @@ func (r *NomadNodeReconciler) markDuplicates(ctx context.Context, nc *nomadv1alp
 			if err := controllerutil.SetControllerReference(nc, &nn, r.Scheme); err != nil {
 				return err
 			}
-			if err := r.Create(ctx, &nn); err != nil && !apierrors.IsAlreadyExists(err) {
-				return err
+			if err := r.Create(ctx, &nn); err != nil {
+				if !apierrors.IsAlreadyExists(err) {
+					return err
+				}
+				// Lost a create race — re-Get so we hold a fresh object (with a
+				// resourceVersion) for the status update below.
+				if err := r.Get(ctx, types.NamespacedName{Name: objName, Namespace: nc.Namespace}, &nn); err != nil {
+					return err
+				}
 			}
 		} else if err != nil {
 			return err

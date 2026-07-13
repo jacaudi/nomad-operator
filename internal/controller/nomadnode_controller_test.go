@@ -261,6 +261,43 @@ var _ = Describe("NomadNode reflector: prune + cascade", func() {
 		Expect(k8s.Get(ctx, types.NamespacedName{Name: "keep", Namespace: ns.Name}, &nomadv1alpha1.NomadNode{})).To(Succeed(), "must survive a list error")
 	})
 
+	It("keeps reflecting the cluster when one node's upsert fails", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-nonfatal-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		// A pre-existing CR whose desired eligibility mismatches Nomad, so
+		// driveDesired calls SetEligibility — which we make fail for this node.
+		bad := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "bad", Namespace: ns.Name, Labels: names(nc).Labels()},
+			Spec:       nomadv1alpha1.NomadNodeSpec{ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "bad", Eligible: false},
+		}
+		Expect(k8s.Create(ctx, bad)).To(Succeed())
+		// A stale CR whose node is absent from the list: pruneAbsent must delete
+		// it. Under a fatal loop, bad's error returns before pruneAbsent ever
+		// runs, so ghost would survive — that is the RED this asserts against.
+		ghost := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "ghost", Namespace: ns.Name, Labels: names(nc).Labels()},
+			Spec:       nomadv1alpha1.NomadNodeSpec{ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "ghost"},
+		}
+		Expect(k8s.Create(ctx, ghost)).To(Succeed())
+
+		fake := &fakeNodeOps{
+			list:    []*api.NodeListStub{{ID: "badid", Name: "bad", Status: "ready", SchedulingEligibility: "eligible"}},
+			eligErr: map[string]error{"badid": errors.New("nomad rejected eligibility toggle")},
+		}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).To(HaveOccurred(), "the node's transient failure is surfaced so the reconcile retries")
+
+		// pruneAbsent still ran despite bad's failure: the absent node's CR is gone.
+		gerr := k8s.Get(ctx, types.NamespacedName{Name: "ghost", Namespace: ns.Name}, &nomadv1alpha1.NomadNode{})
+		Expect(apierrors.IsNotFound(gerr)).To(BeTrue(), "absent node pruned even though another node failed")
+		// The failed node's own CR is NOT pruned (it stays in bound).
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "bad", Namespace: ns.Name}, &nomadv1alpha1.NomadNode{})).
+			To(Succeed(), "a node that failed to reconcile must not have its CR deleted")
+	})
+
 	It("flags ClusterNotReady on existing nodes when the cluster is not Ready", func(ctx SpecContext) {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-notready-"}}
 		Expect(k8s.Create(ctx, ns)).To(Succeed())
