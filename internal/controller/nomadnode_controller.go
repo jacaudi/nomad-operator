@@ -303,7 +303,36 @@ func (r *NomadNodeReconciler) markDuplicates(ctx context.Context, nc *nomadv1alp
 	}
 	return nil
 }
-func (r *NomadNodeReconciler) pruneAbsent(_ context.Context, _ *nomadv1alpha1.NomadCluster, _ map[string]*api.NodeListStub, _ map[string]bool) error {
+
+// pruneAbsent deletes this cluster's NomadNode CRs whose node Name is absent
+// from the successful list (Nomad GC'd them). It is only reached after a
+// successful ListNodes (the reconcile returns earlier on list error), so a
+// transient outage never prunes.
+func (r *NomadNodeReconciler) pruneAbsent(ctx context.Context, nc *nomadv1alpha1.NomadCluster, bound map[string]*api.NodeListStub, dupes map[string]bool) error {
+	present := map[string]bool{}
+	for name := range bound {
+		present[sanitizeNodeName(name)] = true
+	}
+	for name := range dupes {
+		// markDuplicates created these CRs this pass; their nodes ARE present
+		// (just ambiguous), so they must not be pruned.
+		present[sanitizeNodeName(name)] = true
+	}
+	var list nomadv1alpha1.NomadNodeList
+	if err := r.List(ctx, &list, client.InNamespace(nc.Namespace), client.MatchingLabels(names(nc).Labels())); err != nil {
+		return err
+	}
+	for i := range list.Items {
+		nn := &list.Items[i]
+		if nn.Spec.ClusterRef.Name != nc.Name {
+			continue
+		}
+		if !present[nn.Name] {
+			if err := r.Delete(ctx, nn); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
