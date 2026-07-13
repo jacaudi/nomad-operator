@@ -145,7 +145,7 @@ func (r *NomadClusterReconciler) ensureGateway(ctx context.Context, nc *nomadv1a
 // one TCP listener per RPC port, and admit the CR's namespace via
 // allowedRoutes on those listeners. It never creates or mutates the Gateway —
 // the user owns it. Returns ready=false (never an error) for any of those
-// verification failures so the reconciler surfaces GatewayReady=False rather
+// verification failures so the reconciler surfaces ExternalAccessReady=False rather
 // than treating a misconfigured shared Gateway as a hard error.
 func (r *NomadClusterReconciler) ensureExistingGateway(ctx context.Context, nc *nomadv1alpha1.NomadCluster) (string, bool, error) {
 	ref := nc.Spec.ExternalAccess.Gateway.Ref

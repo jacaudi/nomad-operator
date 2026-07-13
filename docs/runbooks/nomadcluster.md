@@ -407,7 +407,7 @@ out-of-cluster clients:
 
 | Mode | `servers` | Exposure | External objects |
 |---|---|---|---|
-| `Gateway` (default) | 1, 3, or 5 | One RPC listener per server behind a Gateway (`TLSRoute` + per-ordinal `TCPRoute`s), addressed by `status.gatewayAddress` | Gateway, `TLSRoute`, per-pod `Service`s, `TCPRoute`s |
+| `Gateway` (default) | 1, 3, or 5 | One RPC listener per server behind a Gateway (`TLSRoute` + per-ordinal `TCPRoute`s), addressed by `status.externalAddress` | Gateway, `TLSRoute`, per-pod `Service`s, `TCPRoute`s |
 | `LoadBalancer` | **1 only** | A single `type: LoadBalancer` Service in front of the lone server | `<name>-lb` Service |
 
 `LoadBalancer` mode is single-VIP and **north-south only**: with `servers: 1`

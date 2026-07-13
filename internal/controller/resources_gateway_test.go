@@ -153,7 +153,7 @@ var _ = Describe("Existing gateway mode", func() {
 		Expect(string(tcp.Spec.ParentRefs[0].Name)).To(Equal("shared-gw"))
 	})
 
-	It("sets GatewayReady=False when a required listener is missing", func() {
+	It("sets ExternalAccessReady=False when a required listener is missing", func() {
 		ctx := context.Background()
 		ns := "existbad"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
@@ -173,7 +173,7 @@ var _ = Describe("Existing gateway mode", func() {
 		Expect(meta_IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.CondExternalAccessReady)).To(BeFalse())
 	})
 
-	It("sets GatewayReady=False when a listener has the right port but the wrong name", func() {
+	It("sets ExternalAccessReady=False when a listener has the right port but the wrong name", func() {
 		ctx := context.Background()
 		ns := "existwrongname"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
@@ -204,7 +204,7 @@ var _ = Describe("Existing gateway mode", func() {
 	// not admit routes from the CR's namespace must still be treated as not
 	// ready — otherwise a shared Gateway silently accepts routes it never
 	// opted into.
-	It("sets GatewayReady=False when the Gateway does not admit the CR's namespace", func() {
+	It("sets ExternalAccessReady=False when the Gateway does not admit the CR's namespace", func() {
 		ctx := context.Background()
 		gwNs := "shared-gw-ns"
 		crNs := "tenant-a"

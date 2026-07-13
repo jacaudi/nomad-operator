@@ -37,8 +37,8 @@ import (
 	"github.com/jacaudi/nomad-operator/internal/nomad"
 )
 
-// requeueShort is used while waiting on external state (cert Secret, Gateway
-// address assignment) that this reconciler doesn't control the timing of.
+// requeueShort is used while waiting on external state (cert Secret,
+// external-access address assignment) that this reconciler doesn't control the timing of.
 const requeueShort = 15 * time.Second
 
 // NomadOps is the subset of the Nomad client the reconciler needs. Defined at
@@ -207,8 +207,8 @@ func (r *NomadClusterReconciler) clientFor(ctx context.Context, nc *nomadv1alpha
 }
 
 // bootstrapAndReady waits for quorum via the injected client, runs the
-// idempotent ACL bootstrap, and advances the cluster to Ready. The gateway
-// address is already persisted to nc.Status.ExternalAddress by the caller
+// idempotent ACL bootstrap, and advances the cluster to Ready. The
+// external-access address is already persisted to nc.Status.ExternalAddress by the caller
 // before this runs, so the body below doesn't consume it directly; the
 // parameter is kept (blank) to match this method's documented interface
 // contract (task-8 brief).
