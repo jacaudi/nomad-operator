@@ -178,10 +178,59 @@ func (r *NomadNodeReconciler) seedDrain(ctx context.Context, id string, ops Noma
 	}
 }
 
-// driveDesired reconciles spec.eligible/drain onto Nomad. Task 7 implements it;
-// Task 5 ships a no-op so mint/mirror are independently testable.
-func (r *NomadNodeReconciler) driveDesired(_ context.Context, _ *nomadv1alpha1.NomadNode, _ *api.NodeListStub, _ NomadNodeOps) error {
+const defaultDrainDeadline = time.Hour
+
+// driveDesired reconciles spec.eligible/drain onto Nomad. Drain, when present,
+// transiently dominates eligibility (Nomad forces a draining node ineligible),
+// so eligibility is only driven when no drain is desired.
+func (r *NomadNodeReconciler) driveDesired(ctx context.Context, nn *nomadv1alpha1.NomadNode, stub *api.NodeListStub, ops NomadNodeOps) error {
+	if nn.Spec.Drain != nil {
+		if drainHandledThisGeneration(nn, stub) {
+			return nil // in progress (converging) or complete (converged)
+		}
+		deadline := defaultDrainDeadline
+		if nn.Spec.Drain.Deadline != nil {
+			deadline = nn.Spec.Drain.Deadline.Duration // explicit value, incl. 0 = no deadline
+		}
+		spec := &api.DrainSpec{Deadline: deadline, IgnoreSystemJobs: nn.Spec.Drain.IgnoreSystemJobs}
+		if err := ops.UpdateDrain(ctx, stub.ID, spec, false); err != nil {
+			return err
+		}
+		nn.Status.DrainObservedGeneration = nn.Generation
+		return nil
+	}
+
+	// No drain desired. If the node is still draining, cancel it, marking it
+	// eligible per spec.eligible.
+	if stub.Drain {
+		return ops.UpdateDrain(ctx, stub.ID, nil, nn.Spec.Eligible)
+	}
+	// Otherwise reconcile eligibility directly, compare-before-write.
+	want := api.NodeSchedulingEligible
+	if !nn.Spec.Eligible {
+		want = api.NodeSchedulingIneligible
+	}
+	if stub.SchedulingEligibility != want {
+		return ops.SetEligibility(ctx, stub.ID, nn.Spec.Eligible)
+	}
 	return nil
+}
+
+// drainHandledThisGeneration reports whether the drain requested at the current
+// spec generation has already been issued and is either IN PROGRESS or COMPLETE
+// — in both cases UpdateDrain must NOT be re-issued. Re-issuing a running drain
+// restarts its relative deadline, so it would slide forever (design §3.3). A
+// drain cancelled out-of-band (Node.Drain==false with LastDrain != complete)
+// matches neither, so it is re-issued — spec wins.
+func drainHandledThisGeneration(nn *nomadv1alpha1.NomadNode, stub *api.NodeListStub) bool {
+	if nn.Status.DrainObservedGeneration != nn.Generation {
+		return false
+	}
+	inProgress := stub.Drain
+	complete := !stub.Drain &&
+		stub.SchedulingEligibility == api.NodeSchedulingIneligible &&
+		stub.LastDrain != nil && stub.LastDrain.Status == api.DrainStatusComplete
+	return inProgress || complete
 }
 
 // mirrorStatus writes the observed node state into NomadNode.status.

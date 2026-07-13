@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -105,5 +107,118 @@ var _ = Describe("NomadNode reflector: disambiguation", func() {
 		cond := meta.FindStatusCondition(nn.Status.Conditions, nomadv1alpha1.NomadNodeCondReconciled)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonDuplicateNodeName))
+	})
+})
+
+var _ = Describe("NomadNode reflector: drive", func() {
+	It("toggles eligibility only on mismatch", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-elig-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		// Pre-create a NomadNode whose spec wants ineligible; Nomad reports eligible.
+		nn := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "e1", Namespace: ns.Name},
+			Spec:       nomadv1alpha1.NomadNodeSpec{ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "e1", Eligible: false},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+
+		fake := &fakeNodeOps{list: []*api.NodeListStub{{ID: "e1id", Name: "e1", Status: "ready", SchedulingEligibility: "eligible"}}}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.eligCalls).To(HaveLen(1))
+		Expect(fake.eligCalls[0]).To(Equal(eligCall{"e1id", false}))
+	})
+
+	It("does not re-issue a completed drain (converges)", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-drain-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		nn := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "d1", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadNodeSpec{
+				ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "d1",
+				Drain: &nomadv1alpha1.NodeDrainSpec{Deadline: &metav1.Duration{Duration: time.Hour}},
+			},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+		// record drainObservedGeneration == current generation, node already drained
+		nn.Status.DrainObservedGeneration = nn.Generation
+		Expect(k8s.Status().Update(ctx, nn)).To(Succeed())
+
+		fake := &fakeNodeOps{list: []*api.NodeListStub{
+			{ID: "d1id", Name: "d1", Status: "ready", SchedulingEligibility: "ineligible", Drain: false,
+				LastDrain: &api.DrainMetadata{Status: api.DrainStatusComplete}},
+		}}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.drainCalls).To(BeEmpty(), "completed drain must not re-issue")
+	})
+
+	It("issues a drain when unsatisfied", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-drain2-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		nn := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "d2", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadNodeSpec{
+				ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "d2",
+				Drain: &nomadv1alpha1.NodeDrainSpec{Deadline: &metav1.Duration{Duration: time.Hour}},
+			},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+
+		fake := &fakeNodeOps{list: []*api.NodeListStub{{ID: "d2id", Name: "d2", Status: "ready", SchedulingEligibility: "eligible", Drain: false}}}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.drainCalls).To(HaveLen(1))
+		Expect(fake.drainCalls[0].spec).NotTo(BeNil())
+		Expect(fake.drainCalls[0].markEligible).To(BeFalse())
+	})
+
+	It("does not re-issue while a drain is in progress", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-drain3-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		nn := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "d3", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadNodeSpec{
+				ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "d3",
+				Drain: &nomadv1alpha1.NodeDrainSpec{Deadline: &metav1.Duration{Duration: time.Hour}},
+			},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+		nn.Status.DrainObservedGeneration = nn.Generation // already issued this generation
+		Expect(k8s.Status().Update(ctx, nn)).To(Succeed())
+
+		fake := &fakeNodeOps{list: []*api.NodeListStub{
+			{ID: "d3id", Name: "d3", Status: "ready", SchedulingEligibility: "ineligible", Drain: true},
+		}}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.drainCalls).To(BeEmpty(), "in-progress drain must not re-issue (deadline would slide)")
+	})
+
+	It("cancels a drain when spec.drain is removed", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-cancel-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		// CR has no spec.drain, but Nomad reports the node still draining.
+		nn := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "cx1", Namespace: ns.Name},
+			Spec:       nomadv1alpha1.NomadNodeSpec{ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "cx1", Eligible: true},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+
+		fake := &fakeNodeOps{list: []*api.NodeListStub{{ID: "cx1id", Name: "cx1", Status: "ready", SchedulingEligibility: "ineligible", Drain: true}}}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.drainCalls).To(HaveLen(1))
+		Expect(fake.drainCalls[0].spec).To(BeNil(), "cancel passes a nil spec")
+		Expect(fake.drainCalls[0].markEligible).To(BeTrue(), "markEligible = spec.eligible (true)")
 	})
 })

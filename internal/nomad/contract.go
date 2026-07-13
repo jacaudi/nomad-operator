@@ -32,6 +32,7 @@ var (
 	_ api.UnexpectedResponseError
 	_ api.DrainSpec
 	_ api.DrainMetadata
+	_ api.DrainStrategy
 )
 
 // Method / constructor signature pins (method expressions; receiver never evaluated).
@@ -63,4 +64,5 @@ var (
 	_ = api.NodeStatusDisconnected
 	_ = api.NodeSchedulingEligible
 	_ = api.NodeSchedulingIneligible
+	_ = api.DrainStatusComplete
 )
