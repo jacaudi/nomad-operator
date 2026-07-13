@@ -9,3 +9,6 @@ bin/
 # Temp
 .docs.tmp/
 .claude/worktrees/
+
+# Session handoff prompts (scratch)
+docs/prompts/
