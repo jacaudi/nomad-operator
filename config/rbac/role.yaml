@@ -49,6 +49,7 @@ rules:
   - nomad.operator.io
   resources:
   - nomadclusters
+  - nomadnodes
   verbs:
   - create
   - delete
@@ -67,6 +68,7 @@ rules:
   - nomad.operator.io
   resources:
   - nomadclusters/status
+  - nomadnodes/status
   verbs:
   - get
   - patch

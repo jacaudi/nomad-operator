@@ -31,6 +31,7 @@ var (
 	_ api.WriteMeta
 	_ api.UnexpectedResponseError
 	_ api.DrainSpec
+	_ api.DrainMetadata
 )
 
 // Method / constructor signature pins (method expressions; receiver never evaluated).
