@@ -78,15 +78,42 @@ func (r *NomadNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	return ctrl.Result{RequeueAfter: nodeResync}, nil
 }
 
-// bindNodes maps node Name -> the stub to manage. Task 5 uses a naive
-// last-wins binding; Task 6 replaces the body with down-straggler
-// disambiguation. dupes holds Names with genuine ambiguity.
+// bindNodes groups stubs by Name and, per Name, binds the single non-down stub
+// (tie-breaking on highest CreateIndex if several non-down share a Name).
+// A down straggler from a re-registered box is ignored, not treated as a
+// duplicate. dupes[name]=true marks Names with two-or-more NON-down stubs
+// (genuine ambiguity) — those are surfaced, not bound.
 func bindNodes(stubs []*api.NodeListStub) (map[string]*api.NodeListStub, map[string]bool) {
-	bound := map[string]*api.NodeListStub{}
+	byName := map[string][]*api.NodeListStub{}
 	for _, s := range stubs {
-		bound[s.Name] = s
+		byName[s.Name] = append(byName[s.Name], s)
 	}
-	return bound, map[string]bool{}
+	bound := map[string]*api.NodeListStub{}
+	dupes := map[string]bool{}
+	for name, group := range byName {
+		var live []*api.NodeListStub
+		for _, s := range group {
+			if s.Status != api.NodeStatusDown {
+				live = append(live, s)
+			}
+		}
+		switch len(live) {
+		case 0:
+			// all down — bind the freshest so the box stays visible until GC
+			best := group[0]
+			for _, s := range group {
+				if s.CreateIndex > best.CreateIndex {
+					best = s
+				}
+			}
+			bound[name] = best
+		case 1:
+			bound[name] = live[0]
+		default:
+			dupes[name] = true // genuine ambiguity: refuse to guess
+		}
+	}
+	return bound, dupes
 }
 
 // upsertNode creates-or-updates the NomadNode for one bound stub: sanitized
@@ -199,8 +226,32 @@ func (r *NomadNodeReconciler) markClusterNotReady(ctx context.Context, nc *nomad
 	return nil
 }
 
-// markDuplicates / pruneAbsent are filled in Tasks 6 and 8; no-op stubs here.
-func (r *NomadNodeReconciler) markDuplicates(_ context.Context, _ *nomadv1alpha1.NomadCluster, _ map[string]bool) error {
+// markDuplicates sets DuplicateNodeName on the CR for each ambiguous Name
+// (creating a minimal CR if none exists yet) without binding it to any node.
+func (r *NomadNodeReconciler) markDuplicates(ctx context.Context, nc *nomadv1alpha1.NomadCluster, dupes map[string]bool) error {
+	for name := range dupes {
+		objName := sanitizeNodeName(name)
+		var nn nomadv1alpha1.NomadNode
+		err := r.Get(ctx, types.NamespacedName{Name: objName, Namespace: nc.Namespace}, &nn)
+		if apierrors.IsNotFound(err) {
+			nn = nomadv1alpha1.NomadNode{
+				ObjectMeta: metav1.ObjectMeta{Name: objName, Namespace: nc.Namespace, Labels: names(nc).Labels()},
+				Spec:       nomadv1alpha1.NomadNodeSpec{ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: name},
+			}
+			if err := controllerutil.SetControllerReference(nc, &nn, r.Scheme); err != nil {
+				return err
+			}
+			if err := r.Create(ctx, &nn); err != nil && !apierrors.IsAlreadyExists(err) {
+				return err
+			}
+		} else if err != nil {
+			return err
+		}
+		setNodeCondition(&nn, nomadv1alpha1.NomadNodeCondReconciled, metav1.ConditionFalse, nomadv1alpha1.ReasonDuplicateNodeName, "two or more non-down nodes share this Name")
+		if err := r.Status().Update(ctx, &nn); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 func (r *NomadNodeReconciler) pruneAbsent(_ context.Context, _ *nomadv1alpha1.NomadCluster, _ map[string]*api.NodeListStub, _ map[string]bool) error {
