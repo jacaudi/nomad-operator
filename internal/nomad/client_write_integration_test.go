@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/hashicorp/nomad/api"
 )
 
 // devToken is a fixed, valid RFC 4122 v4 UUID literal used as the ACL
@@ -73,6 +75,65 @@ func startDevAgentWithACL(t *testing.T) string {
 	}
 	t.Fatalf("nomad dev agent did not become ready within 60s")
 	return ""
+}
+
+// devAgentWithNode boots `nomad agent -dev`, waits for its single client node to
+// report ready, and returns a connected client plus that node's ID. It reuses
+// startDevAgent (client_integration_test.go) for the agent bootstrap and mirrors
+// the ready-node poll from TestDevAgentReadPath. Agent teardown is registered via
+// t.Cleanup. Skips (not fails) when no nomad binary exists.
+func devAgentWithNode(t *testing.T) (*Client, string) {
+	t.Helper()
+	addr, stop := startDevAgent(t)
+	t.Cleanup(stop)
+
+	c, err := New(Config{Address: addr})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	defer cancel()
+
+	// The dev agent registers its client node asynchronously and transitions
+	// initializing -> ready. Poll until exactly one node reports ready.
+	var nodes []*api.NodeListStub
+	deadline := time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		nodes, err = c.ListNodes(ctx)
+		if err == nil && len(nodes) == 1 && nodes[0].Status == api.NodeStatusReady {
+			return c, nodes[0].ID
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("dev node did not become ready within 45s (got %d nodes, err=%v)", len(nodes), err)
+	return nil, ""
+}
+
+// Requires a `nomad` v2.0.4 binary on PATH. Boots a dev agent, waits for a ready
+// node, then flips scheduling eligibility to ineligible and exercises drain
+// set + cancel against a real Nomad.
+func TestNodeEligibilityAndDrainLive(t *testing.T) {
+	c, nodeID := devAgentWithNode(t)
+	ctx := t.Context()
+
+	if err := c.SetEligibility(ctx, nodeID, false); err != nil {
+		t.Fatalf("SetEligibility: %v", err)
+	}
+	node, err := c.NodeInfo(ctx, nodeID)
+	if err != nil {
+		t.Fatalf("NodeInfo: %v", err)
+	}
+	if node.SchedulingEligibility != "ineligible" {
+		t.Errorf("eligibility = %q, want ineligible", node.SchedulingEligibility)
+	}
+
+	if err := c.UpdateDrain(ctx, nodeID, &api.DrainSpec{Deadline: time.Second}, false); err != nil {
+		t.Fatalf("UpdateDrain: %v", err)
+	}
+	if err := c.UpdateDrain(ctx, nodeID, nil, true); err != nil { // cancel, mark eligible
+		t.Fatalf("UpdateDrain cancel: %v", err)
+	}
 }
 
 // Requires a `nomad` v2.0.4 binary on PATH. Boots a dev agent with ACLs enabled,
