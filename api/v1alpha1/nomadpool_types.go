@@ -29,6 +29,7 @@ const (
 	ReasonRegistered       = "Registered"
 	ReasonClusterNotFound  = "ClusterNotFound"
 	ReasonPoolNameConflict = "PoolNameConflict"
+	ReasonBuiltinPool      = "BuiltinPool"
 	ReasonPoolNotEmpty     = "PoolNotEmpty"
 	ReasonDeleteFailed     = "DeleteFailed"
 )

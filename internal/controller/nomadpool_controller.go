@@ -83,6 +83,7 @@ func (r *NomadPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	err := r.Get(ctx, types.NamespacedName{Name: np.Spec.ClusterRef.Name, Namespace: np.Namespace}, &nc)
 	if apierrors.IsNotFound(err) {
 		setPoolCondition(&np, nomadv1alpha1.NomadPoolCondReady, metav1.ConditionFalse, nomadv1alpha1.ReasonClusterNotFound, "referenced NomadCluster does not exist")
+		np.Status.ObservedGeneration = np.Generation
 		if err := r.Status().Update(ctx, &np); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -93,6 +94,7 @@ func (r *NomadPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	if nc.Status.Phase != nomadv1alpha1.PhaseReady {
 		setPoolCondition(&np, nomadv1alpha1.NomadPoolCondReady, metav1.ConditionFalse, nomadv1alpha1.ReasonClusterNotReady, "referenced NomadCluster is not Ready")
+		np.Status.ObservedGeneration = np.Generation
 		if err := r.Status().Update(ctx, &np); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -129,7 +131,8 @@ func (r *NomadPoolReconciler) reconcilePool(ctx context.Context, np *nomadv1alph
 	// Defense-in-depth guard: CEL already rejects built-ins at admission, but
 	// never Register/Delete "default"/"all" even if one reaches here.
 	if np.Spec.PoolName == api.NodePoolDefault || np.Spec.PoolName == api.NodePoolAll {
-		setPoolCondition(np, nomadv1alpha1.NomadPoolCondReady, metav1.ConditionFalse, nomadv1alpha1.ReasonPoolNameConflict, "built-in pool cannot be managed")
+		setPoolCondition(np, nomadv1alpha1.NomadPoolCondReady, metav1.ConditionFalse, nomadv1alpha1.ReasonBuiltinPool, "built-in pool cannot be managed")
+		np.Status.ObservedGeneration = np.Generation
 		return ctrl.Result{}, r.Status().Update(ctx, np)
 	}
 
@@ -140,6 +143,7 @@ func (r *NomadPoolReconciler) reconcilePool(ctx context.Context, np *nomadv1alph
 	if conflict {
 		setPoolCondition(np, nomadv1alpha1.NomadPoolCondReady, metav1.ConditionFalse, nomadv1alpha1.ReasonPoolNameConflict, "another NomadPool targets this poolName on this cluster; skipping Register")
 		r.Recorder.Event(np, "Warning", nomadv1alpha1.ReasonPoolNameConflict, "duplicate poolName on the same cluster; not registering to avoid churn")
+		np.Status.ObservedGeneration = np.Generation
 		if err := r.Status().Update(ctx, np); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -261,11 +265,14 @@ func poolClusterKey(np *nomadv1alpha1.NomadPool) string {
 	return np.Spec.ClusterRef.Name + "/" + np.Spec.PoolName
 }
 
-// hasPoolNameConflict reports whether another NomadPool in this namespace targets
-// the same poolName on the same cluster (design §3.5). A plain namespaced List +
-// in-Go filter — no field indexer, so it works identically on a cached
-// (production) and a bare (envtest) client; at namespaced-pool scale the list
-// cost is negligible and is not what §3.5 avoids (the skipped Register is).
+// hasPoolNameConflict reports whether another live NomadPool in this namespace
+// targets the same poolName on the same cluster (design §3.5). A Terminating
+// sibling (non-zero DeletionTimestamp) does not count: it is being replaced or
+// GC'd and must not block a same-name successor from Registering. A plain
+// namespaced List + in-Go filter — no field indexer, so it works identically
+// on a cached (production) and a bare (envtest) client; at namespaced-pool
+// scale the list cost is negligible and is not what §3.5 avoids (the skipped
+// Register is).
 func (r *NomadPoolReconciler) hasPoolNameConflict(ctx context.Context, np *nomadv1alpha1.NomadPool) (bool, error) {
 	var list nomadv1alpha1.NomadPoolList
 	if err := r.List(ctx, &list, client.InNamespace(np.Namespace)); err != nil {
@@ -273,7 +280,7 @@ func (r *NomadPoolReconciler) hasPoolNameConflict(ctx context.Context, np *nomad
 	}
 	key := poolClusterKey(np)
 	for i := range list.Items {
-		if list.Items[i].Name != np.Name && poolClusterKey(&list.Items[i]) == key {
+		if list.Items[i].Name != np.Name && list.Items[i].DeletionTimestamp.IsZero() && poolClusterKey(&list.Items[i]) == key {
 			return true, nil
 		}
 	}

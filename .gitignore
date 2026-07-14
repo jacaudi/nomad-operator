@@ -12,3 +12,6 @@ bin/
 
 # Session handoff prompts (scratch)
 docs/prompts/
+
+# Subagent-driven-development process scratch (ledger, briefs, reports, diffs)
+.superpowers/

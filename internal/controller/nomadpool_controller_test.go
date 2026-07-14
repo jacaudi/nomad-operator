@@ -46,6 +46,7 @@ var _ = Describe("NomadPool reconciler: cluster resolution", func() {
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonClusterNotFound))
 		Expect(controllerutil.ContainsFinalizer(&got, nomadPoolFinalizer)).To(BeTrue(), "finalizer not added")
+		Expect(got.Status.ObservedGeneration).To(Equal(got.Generation), "observedGeneration must advance on the ClusterNotFound status write")
 	})
 
 	It("sets ClusterNotReady and registers nothing when the referenced cluster is not Ready", func(ctx SpecContext) {
@@ -77,6 +78,7 @@ var _ = Describe("NomadPool reconciler: cluster resolution", func() {
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonClusterNotReady))
 		Expect(f.registered).To(BeEmpty(), "must not register a pool while the cluster is not Ready")
+		Expect(got.Status.ObservedGeneration).To(Equal(got.Generation), "observedGeneration must advance on the ClusterNotReady status write")
 	})
 })
 
@@ -220,7 +222,38 @@ var _ = Describe("NomadPool reconciler: poolName collision", func() {
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonPoolNameConflict))
+			Expect(got.Status.ObservedGeneration).To(Equal(got.Generation), "observedGeneration must advance on the PoolNameConflict status write")
 		}
+	})
+
+	It("does not conflict with a same-poolName sibling that is Terminating, and Registers", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "np-conflict-terminating-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		f := newFakePoolOps()
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+
+		mustCreateTerminatingPool(ctx, ns.Name, "gpu-old", nc.Name, "gpu")
+
+		live := &nomadv1alpha1.NomadPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "gpu-live", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadPoolSpec{
+				ClusterRef: nomadv1alpha1.PoolClusterRef{Name: nc.Name},
+				PoolName:   "gpu",
+			},
+		}
+		Expect(k8s.Create(ctx, live)).To(Succeed())
+
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "gpu-live", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got nomadv1alpha1.NomadPool
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "gpu-live", Namespace: ns.Name}, &got)).To(Succeed())
+		cond := meta.FindStatusCondition(got.Status.Conditions, nomadv1alpha1.NomadPoolCondReady)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).NotTo(Equal(nomadv1alpha1.ReasonPoolNameConflict), "a Terminating sibling must not count as a live conflict")
+		Expect(len(f.registered)).To(BeNumerically(">=", 1), "the replacement pool must be allowed to Register")
 	})
 })
 
@@ -373,6 +406,27 @@ func mustCreateTerminatingCluster(ctx SpecContext, ns string) *nomadv1alpha1.Nom
 	var got nomadv1alpha1.NomadCluster
 	Expect(k8s.Get(ctx, types.NamespacedName{Name: nc.Name, Namespace: ns}, &got)).To(Succeed())
 	Expect(got.DeletionTimestamp).NotTo(BeNil(), "expected cluster to remain Terminating (finalizer held) with a DeletionTimestamp set")
+	return &got
+}
+
+// mustCreateTerminatingPool creates a NomadPool carrying the cleanup finalizer,
+// then deletes it, so it stays present with a non-zero DeletionTimestamp
+// instead of vanishing — simulating a same-name pool being replaced while GC
+// is still in flight (mirrors mustCreateTerminatingCluster).
+func mustCreateTerminatingPool(ctx SpecContext, ns, name, clusterName, poolName string) *nomadv1alpha1.NomadPool {
+	np := &nomadv1alpha1.NomadPool{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Finalizers: []string{nomadPoolFinalizer}},
+		Spec: nomadv1alpha1.NomadPoolSpec{
+			ClusterRef: nomadv1alpha1.PoolClusterRef{Name: clusterName},
+			PoolName:   poolName,
+		},
+	}
+	Expect(k8s.Create(ctx, np)).To(Succeed())
+	Expect(k8s.Delete(ctx, np)).To(Succeed())
+
+	var got nomadv1alpha1.NomadPool
+	Expect(k8s.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+	Expect(got.DeletionTimestamp).NotTo(BeNil(), "expected pool to remain Terminating (finalizer held) with a DeletionTimestamp set")
 	return &got
 }
 
