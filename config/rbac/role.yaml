@@ -19,6 +19,13 @@ rules:
   - update
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
   - apps
   resources:
   - statefulsets
@@ -50,6 +57,7 @@ rules:
   resources:
   - nomadclusters
   - nomadnodes
+  - nomadpools
   verbs:
   - create
   - delete
@@ -62,6 +70,7 @@ rules:
   - nomad.operator.io
   resources:
   - nomadclusters/finalizers
+  - nomadpools/finalizers
   verbs:
   - update
 - apiGroups:
@@ -69,6 +78,7 @@ rules:
   resources:
   - nomadclusters/status
   - nomadnodes/status
+  - nomadpools/status
   verbs:
   - get
   - patch

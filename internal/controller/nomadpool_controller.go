@@ -1,0 +1,190 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
+)
+
+const (
+	poolResync         = 60 * time.Second
+	nomadPoolFinalizer = "nomad.operator.io/nodepool-cleanup"
+)
+
+// NomadPoolReconciler manages Nomad node pools declared as NomadPool CRs. The CR
+// is the source of truth: the operator upserts the pool onto Nomad and deletes
+// it (finalizer-gated).
+type NomadPoolReconciler struct {
+	client.Client
+	Scheme         *runtime.Scheme
+	NewNomadClient NomadPoolClientFactory
+	Recorder       record.EventRecorder
+}
+
+// +kubebuilder:rbac:groups=nomad.operator.io,resources=nomadpools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nomad.operator.io,resources=nomadpools/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=nomad.operator.io,resources=nomadpools/finalizers,verbs=update
+// +kubebuilder:rbac:groups=nomad.operator.io,resources=nomadclusters,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+
+func (r *NomadPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	var np nomadv1alpha1.NomadPool
+	if err := r.Get(ctx, req.NamespacedName, &np); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	if !np.DeletionTimestamp.IsZero() {
+		return r.finalizePool(ctx, &np)
+	}
+
+	// Ensure finalizer before any external side-effect.
+	if !controllerutil.ContainsFinalizer(&np, nomadPoolFinalizer) {
+		controllerutil.AddFinalizer(&np, nomadPoolFinalizer)
+		if err := r.Update(ctx, &np); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Resolve the cluster.
+	var nc nomadv1alpha1.NomadCluster
+	err := r.Get(ctx, types.NamespacedName{Name: np.Spec.ClusterRef.Name, Namespace: np.Namespace}, &nc)
+	if apierrors.IsNotFound(err) {
+		setPoolCondition(&np, nomadv1alpha1.NomadPoolCondReady, metav1.ConditionFalse, nomadv1alpha1.ReasonClusterNotFound, "referenced NomadCluster does not exist")
+		if err := r.Status().Update(ctx, &np); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: poolResync}, nil
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if nc.Status.Phase != nomadv1alpha1.PhaseReady {
+		setPoolCondition(&np, nomadv1alpha1.NomadPoolCondReady, metav1.ConditionFalse, nomadv1alpha1.ReasonClusterNotReady, "referenced NomadCluster is not Ready")
+		if err := r.Status().Update(ctx, &np); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: poolResync}, nil
+	}
+
+	// Set the ownerReference for GC cascade, writing only when it actually changes
+	// (avoids a spurious spec Update every 60s resync — M-1).
+	orig := np.DeepCopy()
+	if err := controllerutil.SetControllerReference(&nc, &np, r.Scheme); err != nil {
+		return ctrl.Result{}, err
+	}
+	if !equality.Semantic.DeepEqual(orig.OwnerReferences, np.OwnerReferences) {
+		if err := r.Update(ctx, &np); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	cfg, err := clusterNomadConfig(ctx, r.Client, &nc)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	ops, err := r.NewNomadClient(cfg)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	return r.reconcilePool(ctx, &np, ops)
+}
+
+// reconcilePool applies the declared pool onto Nomad and derives status.
+// Filled in Tasks 5–7.
+func (r *NomadPoolReconciler) reconcilePool(ctx context.Context, np *nomadv1alpha1.NomadPool, ops NomadPoolOps) (ctrl.Result, error) {
+	return ctrl.Result{RequeueAfter: poolResync}, nil
+}
+
+// finalizePool handles CR deletion. Filled in Task 8.
+func (r *NomadPoolReconciler) finalizePool(ctx context.Context, np *nomadv1alpha1.NomadPool) (ctrl.Result, error) {
+	controllerutil.RemoveFinalizer(np, nomadPoolFinalizer)
+	return ctrl.Result{}, r.Update(ctx, np)
+}
+
+// poolClusterKey is the composite index/collision key for a pool CR.
+func poolClusterKey(np *nomadv1alpha1.NomadPool) string {
+	return np.Spec.ClusterRef.Name + "/" + np.Spec.PoolName
+}
+
+func (r *NomadPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.NewNomadClient == nil {
+		r.NewNomadClient = DefaultNomadPoolClientFactory
+	}
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorderFor("nomadpool")
+	}
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&nomadv1alpha1.NomadPool{}).
+		Watches(&nomadv1alpha1.NomadCluster{}, handler.EnqueueRequestsFromMapFunc(r.poolsForCluster)).
+		Named("nomadpool").
+		Complete(r)
+}
+
+// poolsForCluster maps a NomadCluster event to the reconcile keys of every
+// NomadPool that targets it (so a cluster going Ready reconciles pending pools).
+func (r *NomadPoolReconciler) poolsForCluster(ctx context.Context, obj client.Object) []reconcile.Request {
+	nc, ok := obj.(*nomadv1alpha1.NomadCluster)
+	if !ok {
+		return nil
+	}
+	var list nomadv1alpha1.NomadPoolList
+	if err := r.List(ctx, &list, client.InNamespace(nc.Namespace)); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		if list.Items[i].Spec.ClusterRef.Name == nc.Name {
+			reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Name: list.Items[i].Name, Namespace: list.Items[i].Namespace}})
+		}
+	}
+	return reqs
+}
+
+// setPoolCondition upserts a status condition, preserving LastTransitionTime
+// when the status is unchanged (mirrors setNodeCondition).
+func setPoolCondition(np *nomadv1alpha1.NomadPool, condType string, status metav1.ConditionStatus, reason, msg string) {
+	c := metav1.Condition{Type: condType, Status: status, Reason: reason, Message: msg, ObservedGeneration: np.Generation}
+	for i, existing := range np.Status.Conditions {
+		if existing.Type == condType {
+			if existing.Status != status {
+				c.LastTransitionTime = metav1.Now()
+			} else {
+				c.LastTransitionTime = existing.LastTransitionTime
+			}
+			np.Status.Conditions[i] = c
+			return
+		}
+	}
+	c.LastTransitionTime = metav1.Now()
+	np.Status.Conditions = append(np.Status.Conditions, c)
+}
