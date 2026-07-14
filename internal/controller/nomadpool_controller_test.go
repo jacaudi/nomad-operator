@@ -4,6 +4,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/hashicorp/nomad/api"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -102,6 +103,53 @@ var _ = Describe("NomadPool reconciler: ownerRef + requeue", func() {
 		Expect(got.OwnerReferences[0].Name).To(Equal(nc.Name))
 		Expect(got.OwnerReferences[0].Controller).NotTo(BeNil())
 		Expect(*got.OwnerReferences[0].Controller).To(BeTrue())
+	})
+})
+
+var _ = Describe("NomadPool reconciler: apply", func() {
+	It("registers a pool, preserves unmanaged fields, and skips redundant writes on the next reconcile", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "np-apply-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		f := newFakePoolOps()
+		// Seed an out-of-band pool carrying an unmanaged SchedulerConfiguration.
+		sched := &api.NodePoolSchedulerConfiguration{SchedulerAlgorithm: api.SchedulerAlgorithmSpread}
+		f.pools["gpu"] = &api.NodePool{Name: "gpu", Description: "old", SchedulerConfiguration: sched}
+
+		np := &nomadv1alpha1.NomadPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "gpu", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadPoolSpec{
+				ClusterRef:  nomadv1alpha1.PoolClusterRef{Name: nc.Name},
+				PoolName:    "gpu",
+				Description: "GPU workers",
+				Meta:        map[string]string{"team": "ml"},
+			},
+		}
+		Expect(k8s.Create(ctx, np)).To(Succeed())
+
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "gpu", Namespace: ns.Name}}
+		_, err := r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(f.registered).To(HaveLen(1), "want exactly 1 Register")
+		got := f.registered[0]
+		Expect(got.Description).To(Equal("GPU workers"), "managed field Description not applied")
+		Expect(got.Meta["team"]).To(Equal("ml"), "managed field Meta not applied")
+		Expect(got.SchedulerConfiguration).To(BeIdenticalTo(sched), "unmanaged SchedulerConfiguration not preserved")
+
+		var gotPool nomadv1alpha1.NomadPool
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "gpu", Namespace: ns.Name}, &gotPool)).To(Succeed())
+		cond := meta.FindStatusCondition(gotPool.Status.Conditions, nomadv1alpha1.NomadPoolCondReady)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonRegistered))
+
+		// Second reconcile: nothing changed → no new Register (compare-before-write).
+		_, err = r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.registered).To(HaveLen(1), "compare-before-write failed: a redundant Register was issued")
 	})
 })
 

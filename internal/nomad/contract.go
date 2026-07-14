@@ -72,4 +72,6 @@ var (
 	_ = api.NodeSchedulingEligible
 	_ = api.NodeSchedulingIneligible
 	_ = api.DrainStatusComplete
+	_ = api.NodePoolDefault
+	_ = api.NodePoolAll
 )

@@ -18,8 +18,10 @@ package controller
 
 import (
 	"context"
+	"maps"
 	"time"
 
+	"github.com/hashicorp/nomad/api"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -119,10 +121,47 @@ func (r *NomadPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	return r.reconcilePool(ctx, &np, ops)
 }
 
-// reconcilePool applies the declared pool onto Nomad and derives status.
-// Filled in Tasks 5–7.
+// reconcilePool applies the declared pool onto Nomad (read-modify-write,
+// preserving unmanaged fields) and derives status. Collision detection (Task 6)
+// and status counts (Task 7) are layered in.
 func (r *NomadPoolReconciler) reconcilePool(ctx context.Context, np *nomadv1alpha1.NomadPool, ops NomadPoolOps) (ctrl.Result, error) {
+	// Defense-in-depth guard: CEL already rejects built-ins at admission, but
+	// never Register/Delete "default"/"all" even if one reaches here.
+	if np.Spec.PoolName == api.NodePoolDefault || np.Spec.PoolName == api.NodePoolAll {
+		setPoolCondition(np, nomadv1alpha1.NomadPoolCondReady, metav1.ConditionFalse, nomadv1alpha1.ReasonPoolNameConflict, "built-in pool cannot be managed")
+		return ctrl.Result{}, r.Status().Update(ctx, np)
+	}
+
+	existing, err := ops.GetNodePool(ctx, np.Spec.PoolName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	desired := desiredNodePool(existing, np)
+	if existing == nil || existing.Description != desired.Description || !maps.Equal(existing.Meta, desired.Meta) {
+		if err := ops.UpsertNodePool(ctx, desired); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	setPoolCondition(np, nomadv1alpha1.NomadPoolCondReady, metav1.ConditionTrue, nomadv1alpha1.ReasonRegistered, "node pool registered onto Nomad")
+	np.Status.ObservedGeneration = np.Generation
+	if err := r.Status().Update(ctx, np); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{RequeueAfter: poolResync}, nil
+}
+
+// desiredNodePool builds the NodePool to Register: managed fields (Description,
+// Meta) from spec, unmanaged fields (SchedulerConfiguration, NodeIdentityTTL)
+// preserved from the existing pool. On create (existing==nil) it is fresh.
+func desiredNodePool(existing *api.NodePool, np *nomadv1alpha1.NomadPool) *api.NodePool {
+	var d api.NodePool
+	if existing != nil {
+		d = *existing // preserve SchedulerConfiguration, NodeIdentityTTL, indexes
+	}
+	d.Name = np.Spec.PoolName
+	d.Description = np.Spec.Description
+	d.Meta = np.Spec.Meta
+	return &d
 }
 
 // finalizePool handles CR deletion. Filled in Task 8.
