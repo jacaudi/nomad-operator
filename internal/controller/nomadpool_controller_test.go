@@ -283,6 +283,37 @@ var _ = Describe("NomadPool reconciler: finalize", func() {
 		Expect(got.Status.JobCount).To(Equal(1))
 	})
 
+	It("holds the finalizer, sets DeleteBlocked/ClusterNotReady, and does not call Delete when the cluster is present but not Ready", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "np-delnotready-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		nc.Status.Phase = nomadv1alpha1.PhaseDegraded // present, not deleting, but not Ready
+		Expect(k8s.Status().Update(ctx, nc)).To(Succeed())
+
+		f := newFakePoolOps()
+		f.pools["gpu"] = &api.NodePool{Name: "gpu"}
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+
+		np := &nomadv1alpha1.NomadPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "gpu", Namespace: ns.Name, Finalizers: []string{nomadPoolFinalizer}},
+			Spec:       nomadv1alpha1.NomadPoolSpec{ClusterRef: nomadv1alpha1.PoolClusterRef{Name: nc.Name}, PoolName: "gpu"},
+		}
+		Expect(k8s.Create(ctx, np)).To(Succeed())
+		mustDelete(ctx, np)
+
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "gpu", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got nomadv1alpha1.NomadPool
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "gpu", Namespace: ns.Name}, &got)).To(Succeed())
+		Expect(controllerutil.ContainsFinalizer(&got, nomadPoolFinalizer)).To(BeTrue(), "finalizer must be held while the cluster is not Ready")
+		cond := meta.FindStatusCondition(got.Status.Conditions, nomadv1alpha1.NomadPoolCondDeleteBlocked)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonClusterNotReady))
+		Expect(f.deleted).To(BeEmpty(), "must not call Delete while the cluster is not Ready (don't orphan on a blip)")
+	})
+
 	It("drops the finalizer without calling Delete when the cluster is gone or going (foreground cascade)", func(ctx SpecContext) {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "np-clustergoing-"}}
 		Expect(k8s.Create(ctx, ns)).To(Succeed())

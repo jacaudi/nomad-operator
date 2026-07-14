@@ -221,9 +221,10 @@ func (r *NomadPoolReconciler) finalizePool(ctx context.Context, np *nomadv1alpha
 		return ctrl.Result{}, err
 	}
 
-	if derr := ops.DeleteNodePool(ctx, np.Spec.PoolName); derr != nil {
-		// Delete failed. Keep the finalizer and requeue. Surface a friendly reason
-		// when the pool is non-empty; fetch counts so the user sees what holds it.
+	if derr := ops.DeleteNodePool(ctx, np.Spec.PoolName); derr != nil && !nomad.IsNotFound(derr) {
+		// Delete failed for a reason other than "already gone". Keep the
+		// finalizer and requeue. Surface a friendly reason when the pool is
+		// non-empty; fetch counts so the user sees what holds it.
 		reason := nomadv1alpha1.ReasonDeleteFailed
 		if nomad.IsNodePoolNotEmpty(derr) {
 			reason = nomadv1alpha1.ReasonPoolNotEmpty
@@ -240,6 +241,11 @@ func (r *NomadPoolReconciler) finalizePool(ctx context.Context, np *nomadv1alpha
 		}
 		return ctrl.Result{RequeueAfter: poolResync}, nil
 	}
+	// Delete succeeded OR the pool is already gone (404) — either way there is
+	// nothing left to clean up, so drop the finalizer (design §3.4). Without
+	// this, a pool deleted out-of-band, or a crash between a successful Delete
+	// and this Update landing, would re-issue Delete against a missing pool on
+	// the next reconcile and get stuck Terminating forever.
 	return ctrl.Result{}, r.dropFinalizer(ctx, np)
 }
 
