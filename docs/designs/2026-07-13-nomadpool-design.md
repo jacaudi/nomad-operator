@@ -1,11 +1,13 @@
 # NomadPool — Design
 
-**Type:** design · **Date:** 2026-07-13 (amended 2026-07-13 after SGE review) · **Status:** proposed
+**Type:** design · **Date:** 2026-07-13 (amended 2026-07-13 after SGE design + plan reviews) · **Status:** proposed
 **Feature:** slice 4 — a `NomadPool` CRD that declaratively manages a Nomad **node pool** on a `NomadCluster`: the user owns the pool's definition, the operator applies it to Nomad's control plane.
 
 Follows slice 2 (NomadCluster HA control plane, merged `a1e4d6a`), the external-access-modes follow-up (merged `b91df1a`), and slice 3 (NomadNode, merged `1f02e49`; main HEAD `6c3e0c1`). Slice 3's `NomadNode` mirrors each node's `status.nodePool`; this slice manages the *pools* those nodes reference.
 
 > **Amended 2026-07-13** after an independent sr-go-engineer *design* review (Fable model), verdict *amend-before-planning*. The review verified the managed-lifecycle model, the unmanaged-field preservation, the contract.go pin discipline, and the client seam as sound (all Nomad-api claims re-checked against the pinned `api` source). Folded corrections: **I-1** — the finalizer short-circuit now fires on `cluster NotFound` **or** `cluster.DeletionTimestamp != nil`, closing a `--cascade=foreground` deadlock the pure-NotFound test left open (§3.4); **I-2** — the `Delete` "pool non-empty" signal is elevated to a pre-plan spike, load-bearing for the whole `DeleteBlocked` branch (§6.3); **I-3** — a same-`poolName`+cluster collision is now *detected and surfaced* (`PoolNameConflict` condition + Warning event + skipped `Register`), not merely a prose caveat (§3.5); plus minor clarifications (orphan-premise acknowledgment §3.4, explicit compare-before-write comparator + "Meta is fully managed" §3.3, lazy `jobCount` §3.2). Every folded api claim was re-grounded against the pinned `api` v2.0.4.
+>
+> **Also amended 2026-07-13** after an independent sr-go-engineer *plan* review (Fable): the duplicate-`poolName` collision check (§3.5) drops the field indexer in favour of a plain namespaced `List` + in-Go filter — the indexer was speculative (the list cost is not what §3.5 avoids), and a custom field selector is unsupported on a bare (envtest) client. Behaviour is unchanged; the implementation is simpler and testable on both cached and bare clients.
 
 Every Nomad-domain claim below is grounded in `go doc` against the pinned `github.com/hashicorp/nomad/api` (`v0.0.0-20260707172059-5b83b133998a`, == v2.0.4) and the HashiCorp docs, verified during brainstorming — not assumed from training.
 
@@ -110,13 +112,12 @@ status:
 `SetupWithManager`:
 - `For(&NomadPool{})` — the primary object is the pool CR.
 - `Watches(&NomadCluster{}, → pools with that clusterRef)` — a cluster becoming `Ready` re-reconciles its pending pools promptly (a `NomadPool` created before its cluster is Ready would otherwise wait for the resync).
-- **Field indexer** on a composite `spec.clusterRef.name` + `spec.poolName` key (`mgr.GetFieldIndexer()`), for the O(matches) collision lookup in step 3 below.
 - `RequeueAfter: 60s` steady-state resync — refreshes `nodeCount` and re-asserts the declared spec (self-heals out-of-band drift). Gentler than `NomadNode`'s 30s because pool config is near-static; **not user-configurable in v1**.
 
 **Normal reconcile** (CR not being deleted; `clusterRef` resolves and is `Ready`):
 1. **Ensure finalizer**; set the ownerReference to the `NomadCluster`.
 2. **Build the client** via the shared slice-3 `clusterNomadConfig` helper (in-cluster API Service, CA/client PEM from the cert Secret, token from the cluster's status bootstrap-token Secret, `TLSServerName=server.<region>.nomad`). No global singleton, no `api.DefaultConfig()`.
-3. **Collision check** (§3.5) — via the field indexer, look up other `NomadPool`s targeting the same `poolName` on the same cluster. If any exist, set `Ready=False, reason=PoolNameConflict`, emit a Warning event, and **skip the `Register`** (do not churn Raft) — then still refresh status counts and requeue. Otherwise proceed.
+3. **Collision check** (§3.5) — `List` the namespace's `NomadPool`s and filter for others targeting the same `poolName` on the same cluster. If any exist, set `Ready=False, reason=PoolNameConflict`, emit a Warning event, and **skip the `Register`** (do not churn Raft) — then still refresh status counts and requeue. Otherwise proceed.
 4. **Read-modify-write + compare-before-write** (§3.3) — `Info(poolName)`; build the desired pool preserving unmanaged fields; `Register` only if the managed fields differ. Set `Ready=True` on success.
 5. **Derive status** — `nodeCount = len(ListNodes(poolName))` (feeds the `NODES` printer column) and `observedGeneration`. **`jobCount` is computed only on the finalizer delete-blocked path** (§3.4) where it is surfaced — not on every steady-state resync — avoiding a second per-pool list call each minute for a value with no printer column.
 
@@ -172,11 +173,11 @@ The near-simultaneous edge (pool reconciles while the cluster CR is briefly stil
 
 Two `NomadPool` CRs declaring the *same* `poolName` on the *same* cluster would otherwise fight over one Nomad pool, each re-`Register`ing every resync — flapping `ModifyIndex` and writing Raft continuously (worse than `NomadNode`'s read-only `DuplicateNodeName` stall, because this is *write* churn). The reconciler **detects and surfaces** the collision rather than silently churning or arbitrating a winner:
 
-- A **field indexer** on `spec.clusterRef.name` + `spec.poolName` (registered in `SetupWithManager`) makes the lookup an O(matches) `List`, not a full scan.
-- When step 3 finds one or more *other* `NomadPool`s sharing the key, the reconciler sets `Ready=False, reason=PoolNameConflict`, **emits a Warning event**, and **skips the `Register`** — stopping the Raft write-amplification. Status counts are still mirrored so the CR stays informative.
+- The reconciler `List`s the namespace's `NomadPool`s (a bounded, namespaced list) and filters in Go for others whose `spec.clusterRef.name`+`spec.poolName` matches. No field indexer is used: at namespaced-pool scale a plain `List` is trivially cheap, it works identically on a cached (production) and a bare (envtest) client, and an indexer would be speculative machinery for a scale that does not exist (KISS/YAGNI). The list cost is not what §3.5 avoids — the *skipped `Register`* is.
+- When one or more *other* `NomadPool`s share the key, the reconciler sets `Ready=False, reason=PoolNameConflict`, **emits a Warning event**, and **skips the `Register`** — stopping the Raft write-amplification. Status counts are still mirrored so the CR stays informative.
 - **No winner arbitration and no admission webhook** (both deferred — §5). The operator does not pick which CR "owns" the pool; it refuses to churn and tells the user to resolve the duplicate. Because *every* colliding CR skips its `Register`, the pool's last-written state is left as-is until the conflict is removed — no flapping.
 
-This is the proportionate middle: cheap (one indexed `List` on the reconcile that already reads the pool), additive, and it converts a silent write-amplification failure mode into a visible condition + event.
+This is the proportionate middle: cheap (one namespaced `List` on the reconcile that already reads the pool), additive, and it converts a silent write-amplification failure mode into a visible condition + event.
 
 ---
 

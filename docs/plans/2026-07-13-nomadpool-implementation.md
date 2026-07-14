@@ -62,6 +62,20 @@
 
 ---
 
+## Test Harness (READ FIRST — the per-task test snippets are behavior specs, not final code)
+
+The controller tests run under the **existing Ginkgo/Gomega envtest suite** (`internal/controller/suite_test.go`: `TestControllers` → `RunSpecs`, envtest started in `BeforeSuite`). Follow these facts exactly — the SGE plan review confirmed them against the tree:
+
+- **The envtest client global is `k8s`** (NOT `k8sClient`), a **bare** `client.New(cfg, …)` with **no cache**.
+- **Write every controller test as a Ginkgo `Describe`/`It`** against `k8s`, mirroring `internal/controller/nomadnode_controller_test.go`. Use the Ginkgo node's `ctx`/`SpecContext`, not `context.Background()`. Reuse that file's `readyCluster(...)`-style helper for a ready `NomadCluster`; add small `NomadPool` get/assert helpers next to the existing `NomadNode` ones. **Do NOT** write plain-Go `TestXxx(t *testing.T)` controller tests — they never start envtest, so `k8s` is nil.
+- **CRD/CEL tests (Task 9) and every reconcile test MUST use the real envtest apiserver (`k8s`).** The `controller-runtime/pkg/client/fake` client performs no CEL admission and no field selection, so it cannot validate CEL. (`fake` is only used by the non-envtest unit tests like `nomadclient_test.go`.)
+- **`internal/nomad` tests are plain-Go `testing`** (Task 1) — that package has no envtest dependency.
+- Build the reconciler under test with the fake ops: `&NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}`, then call `Reconcile` with the pool's `NamespacedName`.
+
+Each per-task snippet below specifies the **behavior to assert**; port it into a Ginkgo `It` using the suite's conventions and helper names.
+
+---
+
 ## Task 1: `internal/nomad` node-pool client methods, error helpers, contract pins
 
 **Files:**
@@ -82,63 +96,71 @@
 
 - [ ] **Step 1: Write the failing unit tests**
 
-Create `internal/nomad/nodepool_test.go`. These test the error helpers directly (the `Client` methods are exercised end-to-end in the Task 10 integration test against a real Nomad, matching how `client_test.go`/`errors_test.go` split unit vs integration):
+Create `internal/nomad/nodepool_test.go`. Point a **real** `*Client` at an `httptest.Server`, so the tests exercise the genuine `api.UnexpectedResponseError` shape (real 404 status, real body substrings) with **no Nomad binary** — `api.UnexpectedResponseError` has unexported fields and no public constructor, so this is how to get a real one in a unit test (the SGE-review fix for the "no executed coverage" gap):
 
 ```go
 package nomad
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
-
-	"github.com/hashicorp/nomad/api"
 )
 
-func TestIsNotFound(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"nil", nil, false},
-		{"plain error", errString("boom"), false},
-		{"404", api.UnexpectedResponseError{}, false}, // replaced below
+// newTestClient points a real *Client at an httptest server. Config.Validate
+// (config.go) only requires Address for a plaintext endpoint; if it also
+// requires Region, add Region: "global" here (check config_test.go).
+func newTestClient(t *testing.T, h http.HandlerFunc) *Client {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	c, err := New(Config{Address: srv.URL})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
 	}
-	// api.UnexpectedResponseError has unexported fields; build via the helper the
-	// api package exposes for tests is not available, so assert against StatusCode
-	// through the exported accessor using a constructed value is not possible.
-	// Instead, cover the accessor logic: a non-URE error is never NotFound.
-	for _, tt := range tests[:2] {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := IsNotFound(tt.err); got != tt.want {
-				t.Errorf("IsNotFound() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestIsNodePoolNotEmpty(t *testing.T) {
-	if IsNodePoolNotEmpty(nil) {
-		t.Fatal("nil is not non-empty")
-	}
-	if IsNodePoolNotEmpty(errString("unrelated")) {
-		t.Fatal("unrelated error is not non-empty")
-	}
+	return c
 }
 
 type errString string
 
 func (e errString) Error() string { return string(e) }
 
-var _ = http.StatusNotFound
+func TestGetNodePool_NotFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "node pool not found", http.StatusNotFound)
+	})
+	pool, err := c.GetNodePool(t.Context(), "missing")
+	if err != nil || pool != nil {
+		t.Fatalf("GetNodePool 404 = (%v, %v), want (nil, nil)", pool, err)
+	}
+}
+
+func TestIsNotFound_NonURE(t *testing.T) {
+	if IsNotFound(nil) || IsNotFound(errString("boom")) {
+		t.Fatal("nil / non-URE errors must not be NotFound")
+	}
+}
+
+func TestIsNodePoolNotEmpty_Body(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `node pool "gpu" has nodes in regions: [global]`, http.StatusBadRequest)
+	})
+	err := c.DeleteNodePool(t.Context(), "gpu")
+	if err == nil || !IsNodePoolNotEmpty(err) {
+		t.Fatalf("IsNodePoolNotEmpty(%v) = false, want true", err)
+	}
+	if IsNodePoolNotEmpty(nil) || IsNodePoolNotEmpty(errString("unrelated")) {
+		t.Fatal("nil / unrelated errors must not be non-empty")
+	}
+}
 ```
 
-> Note: `api.UnexpectedResponseError` has unexported fields and no public constructor, so the 404/body branches are covered end-to-end in the Task 10 integration test (as `errors_test.go` does for ACL bootstrap). These unit tests lock the nil/non-URE branches.
+> This gives `IsNotFound` (via a real 404) and `IsNodePoolNotEmpty` (via a real 4xx body) **executed** unit coverage, plus `GetNodePool`'s `(nil,nil)` contract — closing the gap the SGE review flagged. The Task-10 integration test then confirms the exact v2.0.4 wording against real Nomad.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `go test ./internal/nomad/ -run 'TestIsNotFound|TestIsNodePoolNotEmpty' -v`
-Expected: FAIL — `IsNotFound`/`IsNodePoolNotEmpty` undefined.
+Run: `go test ./internal/nomad/ -run 'TestGetNodePool_NotFound|TestIsNotFound_NonURE|TestIsNodePoolNotEmpty_Body' -v`
+Expected: FAIL — `GetNodePool`/`IsNotFound`/`IsNodePoolNotEmpty` undefined.
 
 - [ ] **Step 3: Add the error helpers**
 
@@ -577,7 +599,7 @@ git commit -m "feat(controller): NomadPoolOps consumer interface, factory, and f
 
 ---
 
-## Task 4: Reconciler skeleton — cluster resolution, finalizer, ownerRef, SetupWithManager + field indexer
+## Task 4: Reconciler skeleton — cluster resolution, finalizer, ownerRef, SetupWithManager
 
 **Files:**
 - Create: `internal/controller/nomadpool_controller.go`
@@ -588,13 +610,13 @@ git commit -m "feat(controller): NomadPoolOps consumer interface, factory, and f
 - Produces:
   - `NomadPoolReconciler{ client.Client; Scheme *runtime.Scheme; NewNomadClient NomadPoolClientFactory; Recorder record.EventRecorder }`
   - `func (r *NomadPoolReconciler) SetupWithManager(mgr ctrl.Manager) error`
-  - `const nomadPoolFinalizer`, `const poolClusterIndexKey`
+  - `const nomadPoolFinalizer`; `func poolClusterKey(np *NomadPool) string`
   - `func setPoolCondition(np *NomadPool, condType string, status metav1.ConditionStatus, reason, msg string)`
   - stubs `reconcilePool(...)` and `finalizePool(...)` filled in Tasks 5–8.
 
 - [ ] **Step 1: Write the failing test (cluster resolution conditions + finalizer)**
 
-Create `internal/controller/nomadpool_controller_test.go`. Follow the envtest harness style of `nomadnode_controller_test.go` (same suite `TestControllers`/`suite_test.go`, `k8sClient`, `testEnv`). Use Ginkgo/Gomega **or** the plain-Go envtest style already in the suite — match whichever `nomadnode_controller_test.go` uses. This plan shows the plain-Go style; adapt to Ginkgo if the suite uses it:
+Create `internal/controller/nomadpool_controller_test.go`. Per the **Test Harness** section, write these as Ginkgo `Describe`/`It` against the bare envtest client `k8s`, mirroring `nomadnode_controller_test.go`. The snippet below is written in plain-Go form to show the **behavior and assertions**; port it into `It` blocks using the suite's `ctx`/helpers (`k8s`, not `k8sClient`):
 
 ```go
 package controller
@@ -615,8 +637,8 @@ import (
 // the given fake ops.
 func newPoolReconciler(f *fakeNomadPoolOps) *NomadPoolReconciler {
 	return &NomadPoolReconciler{
-		Client:         k8sClient,
-		Scheme:         k8sClient.Scheme(),
+		Client:         k8s,
+		Scheme:         k8s.Scheme(),
 		NewNomadClient: f.factory(),
 		Recorder:       newFakeRecorder(),
 	}
@@ -664,6 +686,7 @@ import (
 	"context"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -681,9 +704,6 @@ import (
 const (
 	poolResync         = 60 * time.Second
 	nomadPoolFinalizer = "nomad.operator.io/nodepool-cleanup"
-	// poolClusterIndexKey indexes NomadPools by "clusterRef.name/poolName" for
-	// the O(matches) collision lookup (design §3.5).
-	poolClusterIndexKey = "spec.poolCluster"
 )
 
 // NomadPoolReconciler manages Nomad node pools declared as NomadPool CRs. The CR
@@ -742,12 +762,16 @@ func (r *NomadPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{RequeueAfter: poolResync}, nil
 	}
 
-	// Set the ownerReference (idempotent) for GC cascade.
+	// Set the ownerReference for GC cascade, writing only when it actually changes
+	// (avoids a spurious spec Update every 60s resync — M-1).
+	orig := np.DeepCopy()
 	if err := controllerutil.SetControllerReference(&nc, &np, r.Scheme); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.Update(ctx, &np); err != nil {
-		return ctrl.Result{}, err
+	if !equality.Semantic.DeepEqual(orig.OwnerReferences, np.OwnerReferences) {
+		if err := r.Update(ctx, &np); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	cfg, err := clusterNomadConfig(ctx, r.Client, &nc)
@@ -784,16 +808,6 @@ func (r *NomadPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if r.Recorder == nil {
 		r.Recorder = mgr.GetEventRecorderFor("nomadpool")
-	}
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &nomadv1alpha1.NomadPool{}, poolClusterIndexKey,
-		func(obj client.Object) []string {
-			np, ok := obj.(*nomadv1alpha1.NomadPool)
-			if !ok {
-				return nil
-			}
-			return []string{poolClusterKey(np)}
-		}); err != nil {
-		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nomadv1alpha1.NomadPool{}).
@@ -847,15 +861,21 @@ func setPoolCondition(np *nomadv1alpha1.NomadPool, condType string, status metav
 Run: `make test`
 Expected: PASS — `TestReconcile_ClusterNotFound` green; ClusterNotReady covered by a sibling test (add one that creates a non-Ready `NomadCluster` and asserts `ReasonClusterNotReady`).
 
-- [ ] **Step 5: Add the ClusterNotReady sibling test + a finalizer-added assertion**
+- [ ] **Step 5: Add sibling coverage (ClusterNotReady, ownerRef, mapper, requeue — M-2)**
 
-Add `TestReconcile_ClusterNotReady` (create a `NomadCluster` with `Status.Phase != PhaseReady`, reconcile, assert `ReasonClusterNotReady` and that no `UpsertNodePool` was recorded on the fake). Run `make test`; expect PASS.
+Add, as further Ginkgo `It`s:
+- **ClusterNotReady** — a `NomadCluster` with `Status.Phase != PhaseReady`; reconcile; assert `ReasonClusterNotReady` and that the fake recorded **no** `UpsertNodePool`.
+- **ownerReference set** — with a Ready cluster, after reconcile the `NomadPool` carries a controller `ownerReference` to the `NomadCluster` (design §3.4 cascade relies on it).
+- **`poolsForCluster` mapper** — create two `NomadPool`s referencing cluster `prod` and one referencing `other`; call `r.poolsForCluster(ctx, prodCluster)`; assert it returns exactly the two `prod` pools' keys.
+- **RequeueAfter** — a successful reconcile returns `ctrl.Result{RequeueAfter: poolResync}`.
+
+Run `make test`; expect PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add internal/controller/nomadpool_controller.go internal/controller/nomadpool_controller_test.go
-git commit -m "feat(controller): NomadPool reconciler skeleton, cluster resolution, finalizer, field indexer"
+git commit -m "feat(controller): NomadPool reconciler skeleton, cluster resolution, finalizer, ownerRef"
 ```
 
 ---
@@ -1006,8 +1026,8 @@ git commit -m "feat(controller): apply node pool via read-modify-write + compare
 - Test: `internal/controller/nomadpool_controller_test.go`
 
 **Interfaces:**
-- Consumes: the `poolClusterIndexKey` field indexer (Task 4), `r.Recorder`.
-- Produces: `func (r *NomadPoolReconciler) hasPoolNameConflict(ctx, np) (bool, error)`.
+- Consumes: `poolClusterKey` (Task 4), `r.Recorder`.
+- Produces: `func (r *NomadPoolReconciler) hasPoolNameConflict(ctx, np) (bool, error)` (namespaced `List` + in-Go filter).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1051,14 +1071,18 @@ Add the helper and call it at the top of `reconcilePool` (after the built-in gua
 
 ```go
 // hasPoolNameConflict reports whether another NomadPool in this namespace targets
-// the same poolName on the same cluster (design §3.5). Uses the field indexer.
+// the same poolName on the same cluster (design §3.5). A plain namespaced List +
+// in-Go filter — no field indexer, so it works identically on a cached
+// (production) and a bare (envtest) client; at namespaced-pool scale the list
+// cost is negligible and is not what §3.5 avoids (the skipped Register is).
 func (r *NomadPoolReconciler) hasPoolNameConflict(ctx context.Context, np *nomadv1alpha1.NomadPool) (bool, error) {
 	var list nomadv1alpha1.NomadPoolList
-	if err := r.List(ctx, &list, client.InNamespace(np.Namespace), client.MatchingFields{poolClusterIndexKey: poolClusterKey(np)}); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(np.Namespace)); err != nil {
 		return false, err
 	}
+	key := poolClusterKey(np)
 	for i := range list.Items {
-		if list.Items[i].Name != np.Name {
+		if list.Items[i].Name != np.Name && poolClusterKey(&list.Items[i]) == key {
 			return true, nil
 		}
 	}
@@ -1088,7 +1112,7 @@ Insert into `reconcilePool` right after the built-in guard block:
 Run: `make test`
 Expected: PASS — both colliding CRs skip Register and carry `PoolNameConflict`.
 
-> Note: the envtest field indexer must be registered on the test manager/cache. If the suite builds a manager, its `SetupWithManager` registers the indexer; if it uses a bare client, register the same index on the test cache in `suite_test.go` (mirror how existing tests set up caches). Confirm the index is available before asserting — otherwise `List` with `MatchingFields` errors.
+> Note: because `hasPoolNameConflict` uses a plain namespaced `List` (no `MatchingFields`), it runs directly against the bare envtest client `k8s` — no field-index registration, no cache setup. Both colliding `NomadPool`s must already exist in the apiserver before you reconcile either (create both, then reconcile each).
 
 - [ ] **Step 5: Commit**
 
@@ -1200,7 +1224,12 @@ func TestFinalize_DeleteBlocked(t *testing.T) {
 	nc := mustCreateReadyCluster(t, ctx, ns, "prod")
 	f := newFakePoolOps()
 	f.pools["gpu"] = &api.NodePool{Name: "gpu"}
-	f.deleteErr = notEmptyErr() // helper returns an error IsNodePoolNotEmpty matches
+	// The fake returns a PLAIN error: it cannot build an api.UnexpectedResponseError
+	// (unexported fields), so IsNodePoolNotEmpty(err) is false → reason is the
+	// generic ReasonDeleteFailed. The true ReasonPoolNotEmpty branch (a real 4xx
+	// "has nodes in regions" body) is covered by the httptest test in Task 1 and
+	// the real-Nomad spike in Task 10.
+	f.deleteErr = errString("delete failed: node pool has nodes")
 	f.nodeCount, f.jobCount = 2, 1
 	r := newPoolReconciler(f)
 
@@ -1213,9 +1242,9 @@ func TestFinalize_DeleteBlocked(t *testing.T) {
 
 	reconcileOnce(t, ctx, r, ns, "gpu")
 	got := mustGetPool(t, ctx, ns, "gpu") // still present (finalizer held)
-	assertCondition(t, got, nomadv1alpha1.NomadPoolCondDeleteBlocked, metav1.ConditionTrue, nomadv1alpha1.ReasonPoolNotEmpty)
-	if got.Status.JobCount != 1 {
-		t.Errorf("JobCount = %d, want 1", got.Status.JobCount)
+	assertCondition(t, got, nomadv1alpha1.NomadPoolCondDeleteBlocked, metav1.ConditionTrue, nomadv1alpha1.ReasonDeleteFailed)
+	if got.Status.NodeCount != 2 || got.Status.JobCount != 1 {
+		t.Errorf("counts = (%d,%d), want (2,1)", got.Status.NodeCount, got.Status.JobCount)
 	}
 }
 
@@ -1241,7 +1270,7 @@ func TestFinalize_ClusterGoing(t *testing.T) {
 }
 ```
 
-> Helpers to add: `mustDelete` (calls `k8sClient.Delete`; because the finalizer is set, the object gets a `DeletionTimestamp` instead of vanishing), `assertGonePool` (Get returns NotFound), `notEmptyErr` (returns an `api.UnexpectedResponseError`-shaped error whose body contains `has nodes in regions` — since that type has no public constructor in envtest, use a small local error type that `IsNodePoolNotEmpty` matches by wrapping; alternatively have the fake's `DeleteNodePool` return a sentinel and stub `IsNodePoolNotEmpty` via an injected predicate. Simplest: make `notEmptyErr()` return `errString("...has nodes in regions...")` and have the reconciler use `nomad.IsNodePoolNotEmpty`; since that helper requires a URE type, instead add a package-level `errors.New` sentinel path — see Step 3 note). `mustCreateTerminatingCluster` creates a cluster with a finalizer then deletes it so it stays present with a `DeletionTimestamp`.
+> Helpers to add (as Ginkgo-suite helpers against `k8s`): `mustDelete` (calls `k8s.Delete`; because the finalizer is set, the object gets a `DeletionTimestamp` instead of vanishing), `assertGonePool` (Get returns NotFound), and `mustCreateTerminatingCluster` (creates a `NomadCluster` with a dummy finalizer, then deletes it, so it stays present with a non-zero `DeletionTimestamp`). No `notEmptyErr` helper is needed — the fake returns a plain error and the test asserts `ReasonDeleteFailed`; the real `ReasonPoolNotEmpty` (URE body) branch is covered in Task 1 (httptest) and Task 10 (real Nomad).
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -1318,7 +1347,7 @@ func (r *NomadPoolReconciler) dropFinalizer(ctx context.Context, np *nomadv1alph
 }
 ```
 
-> On `notEmptyErr` in tests: because `api.UnexpectedResponseError` has no public constructor, the delete-blocked test cannot easily produce one. Handle this by keeping the fake's `deleteErr` a plain error and asserting the **generic** `ReasonDeleteFailed` path in `TestFinalize_DeleteBlocked` (rename it accordingly), and covering the true `ReasonPoolNotEmpty` substring branch in the Task-10 **integration** test against real Nomad (where a real 4xx body arrives). Adjust the Step-1 test to assert `ReasonDeleteFailed` with the fake, plus that counts are populated and the finalizer is held.
+> The delete-blocked test asserts the generic `ReasonDeleteFailed` (the fake returns a plain error that `IsNodePoolNotEmpty` cannot match). The reconciler still populates `NodeCount`/`JobCount` and holds the finalizer — assert all three. The `ReasonPoolNotEmpty` branch is exercised where a real `UnexpectedResponseError` body exists: the Task-1 httptest helper test and the Task-10 real-Nomad spike.
 
 - [ ] **Step 4: Run tests**
 
@@ -1366,7 +1395,7 @@ func TestCRD_RejectsBuiltinPoolNames(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "np-" + name, Namespace: ns},
 			Spec:       nomadv1alpha1.NomadPoolSpec{ClusterRef: nomadv1alpha1.PoolClusterRef{Name: "prod"}, PoolName: name},
 		}
-		if err := k8sClient.Create(ctx, np); err == nil {
+		if err := k8s.Create(ctx, np); err == nil {
 			t.Errorf("poolName %q must be rejected by CEL", name)
 		}
 	}
@@ -1381,7 +1410,7 @@ func TestCRD_PoolNameImmutable(t *testing.T) {
 	}
 	mustCreate(t, ctx, np)
 	np.Spec.PoolName = "gpu2"
-	if err := k8sClient.Update(ctx, np); err == nil {
+	if err := k8s.Update(ctx, np); err == nil {
 		t.Error("poolName must be immutable")
 	}
 }
@@ -1393,7 +1422,7 @@ func TestCRD_RejectsInvalidPoolName(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "bad", Namespace: ns},
 		Spec:       nomadv1alpha1.NomadPoolSpec{ClusterRef: nomadv1alpha1.PoolClusterRef{Name: "prod"}, PoolName: "has spaces"},
 	}
-	if err := k8sClient.Create(ctx, np); err == nil {
+	if err := k8s.Create(ctx, np); err == nil {
 		t.Error("poolName with spaces must be rejected by the pattern")
 	}
 }
@@ -1525,7 +1554,7 @@ git commit -m "feat: wire NomadPool reconciler, runbook, and live node-pool inte
 - Register/Delete client + 404 handling (§4) → Task 1. ✔
 - Read-modify-write + compare-before-write + Meta-fully-managed (§3.3) → Task 5. ✔
 - Finalizer + cluster-gone-*or-going* short-circuit, foreground cascade (§3.4, I-1) → Task 8. ✔
-- Duplicate-poolName detect+surface via field indexer (§3.5, I-3) → Tasks 4 (indexer) + 6. ✔
+- Duplicate-poolName detect+surface via namespaced List + filter (§3.5, I-3) → Task 6. ✔
 - Status conditions + nodeCount (steady) + jobCount (delete path) (§3.1/§3.2, M-2) → Tasks 5/7/8. ✔
 - CEL: immutability, built-in rejection, name pattern (§3.1) → Tasks 2 (rules) + 9 (behavior). ✔
 - Built-in Go guard + coupled constant pins (§4.1) → Task 5. ✔
@@ -1537,6 +1566,6 @@ git commit -m "feat: wire NomadPool reconciler, runbook, and live node-pool inte
 
 **2. Placeholder scan:** No "TBD"/"handle edge cases"/"similar to Task N" — every code step carries complete code. The one deliberately deferred detail (exact v2.0.4 non-empty `Delete` body) is a *runtime-observed* value captured by the Task-10 integration test with a working generic fallback (`ReasonDeleteFailed`), not a code placeholder.
 
-**3. Type consistency:** `NomadPoolOps` methods match the Task-1 `Client` methods verbatim; `desiredNodePool`/`poolClusterKey`/`hasPoolNameConflict`/`setPoolCondition`/`dropFinalizer`/`finalizePool`/`reconcilePool` are used consistently; condition types/reasons (`NomadPoolCondReady`, `NomadPoolCondDeleteBlocked`, `ReasonRegistered`, `ReasonClusterNotFound`, `ReasonPoolNameConflict`, `ReasonPoolNotEmpty`, `ReasonDeleteFailed`, reused `ReasonClusterNotReady`) are declared in Task 2 and referenced thereafter. `poolClusterIndexKey` is registered in Task 4 and consumed in Task 6.
+**3. Type consistency:** `NomadPoolOps` methods match the Task-1 `Client` methods verbatim; `desiredNodePool`/`poolClusterKey`/`hasPoolNameConflict`/`setPoolCondition`/`dropFinalizer`/`finalizePool`/`reconcilePool` are used consistently; condition types/reasons (`NomadPoolCondReady`, `NomadPoolCondDeleteBlocked`, `ReasonRegistered`, `ReasonClusterNotFound`, `ReasonPoolNameConflict`, `ReasonPoolNotEmpty`, `ReasonDeleteFailed`, reused `ReasonClusterNotReady`) are declared in Task 2 and referenced thereafter. `poolClusterKey` is defined in Task 4 and consumed by Task 6's collision filter.
 
-**Note for the executor:** match the existing envtest suite's testing style (Ginkgo vs plain-Go) and its helper conventions in `internal/controller/suite_test.go` / `nomadnode_controller_test.go`; the test code above is illustrative of behavior to assert, not of the suite's exact harness idiom. Register the `poolClusterIndexKey` field index on the test cache if the suite uses a bare client rather than a full manager (Task 6 note).
+**Note for the executor:** follow the **Test Harness** section at the top — controller tests are Ginkgo `Describe`/`It` against the bare envtest client `k8s`, mirroring `internal/controller/nomadnode_controller_test.go`; the per-task snippets specify behavior to assert, not the suite's exact harness idiom. There is no field indexer (Task 6 uses a plain namespaced `List`), so no cache/index registration is needed. `internal/nomad` tests are plain-Go and use `httptest` for real error-shape coverage (Task 1).
