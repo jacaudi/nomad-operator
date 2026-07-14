@@ -155,6 +155,12 @@ func (r *NomadPoolReconciler) reconcilePool(ctx context.Context, np *nomadv1alph
 			return ctrl.Result{}, err
 		}
 	}
+	count, err := ops.CountNodePoolNodes(ctx, np.Spec.PoolName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	np.Status.NodeCount = count
+
 	setPoolCondition(np, nomadv1alpha1.NomadPoolCondReady, metav1.ConditionTrue, nomadv1alpha1.ReasonRegistered, "node pool registered onto Nomad")
 	np.Status.ObservedGeneration = np.Generation
 	if err := r.Status().Update(ctx, np); err != nil {

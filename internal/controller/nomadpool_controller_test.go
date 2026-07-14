@@ -153,6 +153,34 @@ var _ = Describe("NomadPool reconciler: apply", func() {
 	})
 })
 
+var _ = Describe("NomadPool reconciler: status nodeCount", func() {
+	It("mirrors CountNodePoolNodes into status.nodeCount on a successful reconcile", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "np-nodecount-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		f := newFakePoolOps()
+		f.nodeCount = 3
+
+		np := &nomadv1alpha1.NomadPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "gpu", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadPoolSpec{
+				ClusterRef: nomadv1alpha1.PoolClusterRef{Name: nc.Name},
+				PoolName:   "gpu",
+			},
+		}
+		Expect(k8s.Create(ctx, np)).To(Succeed())
+
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "gpu", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got nomadv1alpha1.NomadPool
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "gpu", Namespace: ns.Name}, &got)).To(Succeed())
+		Expect(got.Status.NodeCount).To(Equal(3))
+	})
+})
+
 var _ = Describe("NomadPool reconciler: poolName collision", func() {
 	It("skips Register and sets PoolNameConflict on both CRs when two pools share a poolName+cluster", func(ctx SpecContext) {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "np-conflict-"}}
