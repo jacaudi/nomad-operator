@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
+	"github.com/jacaudi/nomad-operator/internal/nomad"
 )
 
 const (
@@ -183,10 +184,70 @@ func desiredNodePool(existing *api.NodePool, np *nomadv1alpha1.NomadPool) *api.N
 	return &d
 }
 
-// finalizePool handles CR deletion. Filled in Task 8.
+// finalizePool deletes the Nomad pool when the CR is deleted, gated so it never
+// deadlocks a cascade: if the cluster is gone OR going (DeletionTimestamp set),
+// there is nothing to clean up (the control plane is gone/going too), so drop
+// the finalizer without calling Delete. This closes both background and
+// foreground cascade (design §3.4).
 func (r *NomadPoolReconciler) finalizePool(ctx context.Context, np *nomadv1alpha1.NomadPool) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(np, nomadPoolFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	var nc nomadv1alpha1.NomadCluster
+	err := r.Get(ctx, types.NamespacedName{Name: np.Spec.ClusterRef.Name, Namespace: np.Namespace}, &nc)
+	clusterGoneOrGoing := apierrors.IsNotFound(err) || (err == nil && !nc.DeletionTimestamp.IsZero())
+	if clusterGoneOrGoing {
+		return ctrl.Result{}, r.dropFinalizer(ctx, np)
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if nc.Status.Phase != nomadv1alpha1.PhaseReady {
+		// Cluster present, not deleting, but unreachable — do NOT orphan on a blip.
+		setPoolCondition(np, nomadv1alpha1.NomadPoolCondDeleteBlocked, metav1.ConditionTrue, nomadv1alpha1.ReasonClusterNotReady, "cluster not Ready; cannot confirm pool deletion")
+		if uerr := r.Status().Update(ctx, np); uerr != nil {
+			return ctrl.Result{}, uerr
+		}
+		return ctrl.Result{RequeueAfter: poolResync}, nil
+	}
+
+	cfg, err := clusterNomadConfig(ctx, r.Client, &nc)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	ops, err := r.NewNomadClient(cfg)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if derr := ops.DeleteNodePool(ctx, np.Spec.PoolName); derr != nil {
+		// Delete failed. Keep the finalizer and requeue. Surface a friendly reason
+		// when the pool is non-empty; fetch counts so the user sees what holds it.
+		reason := nomadv1alpha1.ReasonDeleteFailed
+		if nomad.IsNodePoolNotEmpty(derr) {
+			reason = nomadv1alpha1.ReasonPoolNotEmpty
+		}
+		if nodes, e := ops.CountNodePoolNodes(ctx, np.Spec.PoolName); e == nil {
+			np.Status.NodeCount = nodes
+		}
+		if jobs, e := ops.CountNodePoolJobs(ctx, np.Spec.PoolName); e == nil {
+			np.Status.JobCount = jobs
+		}
+		setPoolCondition(np, nomadv1alpha1.NomadPoolCondDeleteBlocked, metav1.ConditionTrue, reason, derr.Error())
+		if uerr := r.Status().Update(ctx, np); uerr != nil {
+			return ctrl.Result{}, uerr
+		}
+		return ctrl.Result{RequeueAfter: poolResync}, nil
+	}
+	return ctrl.Result{}, r.dropFinalizer(ctx, np)
+}
+
+// dropFinalizer removes the cleanup finalizer, allowing Kubernetes to garbage
+// collect the CR.
+func (r *NomadPoolReconciler) dropFinalizer(ctx context.Context, np *nomadv1alpha1.NomadPool) error {
 	controllerutil.RemoveFinalizer(np, nomadPoolFinalizer)
-	return ctrl.Result{}, r.Update(ctx, np)
+	return r.Update(ctx, np)
 }
 
 // poolClusterKey is the composite index/collision key for a pool CR.

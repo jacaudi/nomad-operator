@@ -1,16 +1,20 @@
 package controller
 
 import (
+	"errors"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/hashicorp/nomad/api"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
@@ -219,6 +223,127 @@ var _ = Describe("NomadPool reconciler: poolName collision", func() {
 		}
 	})
 })
+
+var _ = Describe("NomadPool reconciler: finalize", func() {
+	It("deletes the pool from Nomad and removes the finalizer on successful delete", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "np-delete-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		f := newFakePoolOps()
+		f.pools["gpu"] = &api.NodePool{Name: "gpu"}
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+
+		np := &nomadv1alpha1.NomadPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "gpu", Namespace: ns.Name, Finalizers: []string{nomadPoolFinalizer}},
+			Spec:       nomadv1alpha1.NomadPoolSpec{ClusterRef: nomadv1alpha1.PoolClusterRef{Name: nc.Name}, PoolName: "gpu"},
+		}
+		Expect(k8s.Create(ctx, np)).To(Succeed())
+		mustDelete(ctx, np)
+
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "gpu", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.deleted).To(Equal([]string{"gpu"}), "pool not deleted from Nomad")
+		assertGonePool(ctx, ns.Name, "gpu")
+	})
+
+	It("holds the finalizer, sets DeleteBlocked, and surfaces node/job counts when Delete fails", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "np-delblocked-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		f := newFakePoolOps()
+		f.pools["gpu"] = &api.NodePool{Name: "gpu"}
+		// A plain error: the fake cannot construct a real api.UnexpectedResponseError
+		// (unexported fields), so IsNodePoolNotEmpty is false -> the generic
+		// ReasonDeleteFailed applies. The real ReasonPoolNotEmpty/URE-body branch is
+		// covered by Task 1's httptest test and Task 10's live spike.
+		f.deleteErr = errors.New("delete failed: node pool has nodes")
+		f.nodeCount, f.jobCount = 2, 1
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+
+		np := &nomadv1alpha1.NomadPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "gpu", Namespace: ns.Name, Finalizers: []string{nomadPoolFinalizer}},
+			Spec:       nomadv1alpha1.NomadPoolSpec{ClusterRef: nomadv1alpha1.PoolClusterRef{Name: nc.Name}, PoolName: "gpu"},
+		}
+		Expect(k8s.Create(ctx, np)).To(Succeed())
+		mustDelete(ctx, np)
+
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "gpu", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got nomadv1alpha1.NomadPool
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "gpu", Namespace: ns.Name}, &got)).To(Succeed())
+		Expect(controllerutil.ContainsFinalizer(&got, nomadPoolFinalizer)).To(BeTrue(), "finalizer must be held when Delete fails")
+		cond := meta.FindStatusCondition(got.Status.Conditions, nomadv1alpha1.NomadPoolCondDeleteBlocked)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonDeleteFailed))
+		Expect(got.Status.NodeCount).To(Equal(2))
+		Expect(got.Status.JobCount).To(Equal(1))
+	})
+
+	It("drops the finalizer without calling Delete when the cluster is gone or going (foreground cascade)", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "np-clustergoing-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := mustCreateTerminatingCluster(ctx, ns.Name)
+
+		f := newFakePoolOps()
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+
+		np := &nomadv1alpha1.NomadPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "gpu", Namespace: ns.Name, Finalizers: []string{nomadPoolFinalizer}},
+			Spec:       nomadv1alpha1.NomadPoolSpec{ClusterRef: nomadv1alpha1.PoolClusterRef{Name: nc.Name}, PoolName: "gpu"},
+		}
+		Expect(k8s.Create(ctx, np)).To(Succeed())
+		mustDelete(ctx, np)
+
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "gpu", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.deleted).To(BeEmpty(), "must NOT call Delete when the cluster is going away")
+		assertGonePool(ctx, ns.Name, "gpu")
+	})
+})
+
+// mustDelete deletes obj. Because the object carries a finalizer, this sets a
+// DeletionTimestamp rather than removing it from etcd immediately.
+func mustDelete(ctx SpecContext, obj client.Object) {
+	Expect(k8s.Delete(ctx, obj)).To(Succeed())
+}
+
+// assertGonePool asserts the pool CR no longer exists: the finalizer was
+// removed and Kubernetes garbage-collected the object.
+func assertGonePool(ctx SpecContext, ns, name string) {
+	var got nomadv1alpha1.NomadPool
+	err := k8s.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)
+	Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected pool %s/%s to be gone, got: %v", ns, name, err)
+}
+
+// mustCreateTerminatingCluster creates a NomadCluster carrying a dummy
+// finalizer, then deletes it, so it stays present with a non-zero
+// DeletionTimestamp instead of vanishing — simulating a foreground-cascade
+// delete (`--cascade=foreground`) in progress.
+func mustCreateTerminatingCluster(ctx SpecContext, ns string) *nomadv1alpha1.NomadCluster {
+	nc := &nomadv1alpha1.NomadCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "prod", Namespace: ns, Finalizers: []string{"test.nomad.operator.io/hold"}},
+		Spec: nomadv1alpha1.NomadClusterSpec{
+			Image: "hashicorp/nomad:2.0.4", Servers: 1, Region: "global",
+			Storage: nomadv1alpha1.StorageSpec{Size: "1Gi"},
+			TLS:     nomadv1alpha1.TLSSpec{CertSecretRef: "cert"},
+			ExternalAccess: nomadv1alpha1.ExternalAccessSpec{
+				Mode:         nomadv1alpha1.ExternalAccessLoadBalancer,
+				LoadBalancer: &nomadv1alpha1.LoadBalancerSpec{},
+			},
+		},
+	}
+	Expect(k8s.Create(ctx, nc)).To(Succeed())
+	Expect(k8s.Delete(ctx, nc)).To(Succeed())
+
+	var got nomadv1alpha1.NomadCluster
+	Expect(k8s.Get(ctx, types.NamespacedName{Name: nc.Name, Namespace: ns}, &got)).To(Succeed())
+	Expect(got.DeletionTimestamp).NotTo(BeNil(), "expected cluster to remain Terminating (finalizer held) with a DeletionTimestamp set")
+	return &got
+}
 
 var _ = Describe("NomadPool reconciler: poolsForCluster mapper", func() {
 	It("returns exactly the pools referencing the given cluster", func(ctx SpecContext) {
