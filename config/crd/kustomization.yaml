@@ -4,6 +4,7 @@
 resources:
 - bases/nomad.operator.io_nomadclusters.yaml
 - bases/nomad.operator.io_nomadnodes.yaml
+- bases/nomad.operator.io_nomadpools.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
