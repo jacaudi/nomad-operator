@@ -132,6 +132,19 @@ func (r *NomadPoolReconciler) reconcilePool(ctx context.Context, np *nomadv1alph
 		return ctrl.Result{}, r.Status().Update(ctx, np)
 	}
 
+	conflict, err := r.hasPoolNameConflict(ctx, np)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if conflict {
+		setPoolCondition(np, nomadv1alpha1.NomadPoolCondReady, metav1.ConditionFalse, nomadv1alpha1.ReasonPoolNameConflict, "another NomadPool targets this poolName on this cluster; skipping Register")
+		r.Recorder.Event(np, "Warning", nomadv1alpha1.ReasonPoolNameConflict, "duplicate poolName on the same cluster; not registering to avoid churn")
+		if err := r.Status().Update(ctx, np); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: poolResync}, nil
+	}
+
 	existing, err := ops.GetNodePool(ctx, np.Spec.PoolName)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -173,6 +186,25 @@ func (r *NomadPoolReconciler) finalizePool(ctx context.Context, np *nomadv1alpha
 // poolClusterKey is the composite index/collision key for a pool CR.
 func poolClusterKey(np *nomadv1alpha1.NomadPool) string {
 	return np.Spec.ClusterRef.Name + "/" + np.Spec.PoolName
+}
+
+// hasPoolNameConflict reports whether another NomadPool in this namespace targets
+// the same poolName on the same cluster (design §3.5). A plain namespaced List +
+// in-Go filter — no field indexer, so it works identically on a cached
+// (production) and a bare (envtest) client; at namespaced-pool scale the list
+// cost is negligible and is not what §3.5 avoids (the skipped Register is).
+func (r *NomadPoolReconciler) hasPoolNameConflict(ctx context.Context, np *nomadv1alpha1.NomadPool) (bool, error) {
+	var list nomadv1alpha1.NomadPoolList
+	if err := r.List(ctx, &list, client.InNamespace(np.Namespace)); err != nil {
+		return false, err
+	}
+	key := poolClusterKey(np)
+	for i := range list.Items {
+		if list.Items[i].Name != np.Name && poolClusterKey(&list.Items[i]) == key {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *NomadPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {

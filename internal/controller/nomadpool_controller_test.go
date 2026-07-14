@@ -153,6 +153,45 @@ var _ = Describe("NomadPool reconciler: apply", func() {
 	})
 })
 
+var _ = Describe("NomadPool reconciler: poolName collision", func() {
+	It("skips Register and sets PoolNameConflict on both CRs when two pools share a poolName+cluster", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "np-conflict-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		f := newFakePoolOps()
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+
+		// Both CRs must exist before either is reconciled, so the List sees both.
+		for _, objName := range []string{"gpu-a", "gpu-b"} {
+			np := &nomadv1alpha1.NomadPool{
+				ObjectMeta: metav1.ObjectMeta{Name: objName, Namespace: ns.Name},
+				Spec: nomadv1alpha1.NomadPoolSpec{
+					ClusterRef: nomadv1alpha1.PoolClusterRef{Name: nc.Name},
+					PoolName:   "gpu",
+				},
+			}
+			Expect(k8s.Create(ctx, np)).To(Succeed())
+		}
+
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "gpu-a", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "gpu-b", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(f.registered).To(BeEmpty(), "colliding CRs must skip Register")
+
+		for _, objName := range []string{"gpu-a", "gpu-b"} {
+			var got nomadv1alpha1.NomadPool
+			Expect(k8s.Get(ctx, types.NamespacedName{Name: objName, Namespace: ns.Name}, &got)).To(Succeed())
+			cond := meta.FindStatusCondition(got.Status.Conditions, nomadv1alpha1.NomadPoolCondReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonPoolNameConflict))
+		}
+	})
+})
+
 var _ = Describe("NomadPool reconciler: poolsForCluster mapper", func() {
 	It("returns exactly the pools referencing the given cluster", func(ctx SpecContext) {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "np-mapper-"}}
