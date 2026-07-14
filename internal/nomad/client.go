@@ -131,3 +131,50 @@ func (c *Client) UpdateDrain(ctx context.Context, nodeID string, spec *api.Drain
 	}
 	return nil
 }
+
+// GetNodePool returns the node pool by name, or (nil, nil) if it does not exist.
+func (c *Client) GetNodePool(ctx context.Context, name string) (*api.NodePool, error) {
+	pool, _, err := c.api.NodePools().Info(name, queryOpts(ctx))
+	if err != nil {
+		if IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("nomad: get node pool %q: %w", name, err)
+	}
+	return pool, nil
+}
+
+// UpsertNodePool creates or updates a node pool (Nomad's Register is an upsert).
+func (c *Client) UpsertNodePool(ctx context.Context, pool *api.NodePool) error {
+	if _, err := c.api.NodePools().Register(pool, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+		return fmt.Errorf("nomad: upsert node pool %q: %w", pool.Name, err)
+	}
+	return nil
+}
+
+// DeleteNodePool deletes a node pool by name. Nomad refuses to delete a pool
+// that still has nodes or non-terminal jobs (see IsNodePoolNotEmpty).
+func (c *Client) DeleteNodePool(ctx context.Context, name string) error {
+	if _, err := c.api.NodePools().Delete(name, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+		return fmt.Errorf("nomad: delete node pool %q: %w", name, err)
+	}
+	return nil
+}
+
+// CountNodePoolNodes returns how many nodes are registered in the pool.
+func (c *Client) CountNodePoolNodes(ctx context.Context, name string) (int, error) {
+	nodes, _, err := c.api.NodePools().ListNodes(name, queryOpts(ctx))
+	if err != nil {
+		return 0, fmt.Errorf("nomad: list node pool %q nodes: %w", name, err)
+	}
+	return len(nodes), nil
+}
+
+// CountNodePoolJobs returns how many jobs target the pool.
+func (c *Client) CountNodePoolJobs(ctx context.Context, name string) (int, error) {
+	jobs, _, err := c.api.NodePools().ListJobs(name, queryOpts(ctx))
+	if err != nil {
+		return 0, fmt.Errorf("nomad: list node pool %q jobs: %w", name, err)
+	}
+	return len(jobs), nil
+}

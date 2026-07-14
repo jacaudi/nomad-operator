@@ -29,3 +29,37 @@ func IsACLAlreadyBootstrapped(err error) bool {
 	}
 	return ure.StatusCode() == http.StatusBadRequest && strings.Contains(ure.Body(), aclBootstrapAlreadyDoneText)
 }
+
+// nodePoolNotEmptyTexts are the substrings Nomad's server embeds in the error
+// body when a node pool cannot be deleted because it still has nodes or
+// non-terminal jobs (nomad/node_pool_endpoint.go). Verified against Nomad
+// source; the Task-10 integration spike confirms the exact v2.0.4 wording.
+// Used only to choose a friendlier DeleteBlocked reason — control flow keeps the
+// finalizer on ANY Delete error regardless.
+var nodePoolNotEmptyTexts = []string{"has nodes in regions", "has non-terminal jobs in regions"}
+
+// IsNotFound reports whether err is (or wraps) an api.UnexpectedResponseError
+// with HTTP 404 — e.g. Info on a node pool that does not exist.
+func IsNotFound(err error) bool {
+	ure, ok := errors.AsType[api.UnexpectedResponseError](err)
+	if !ok {
+		return false
+	}
+	return ure.StatusCode() == http.StatusNotFound
+}
+
+// IsNodePoolNotEmpty reports whether err is Nomad's refusal to delete a node
+// pool that still has nodes or non-terminal jobs.
+func IsNodePoolNotEmpty(err error) bool {
+	ure, ok := errors.AsType[api.UnexpectedResponseError](err)
+	if !ok {
+		return false
+	}
+	body := ure.Body()
+	for _, s := range nodePoolNotEmptyTexts {
+		if strings.Contains(body, s) {
+			return true
+		}
+	}
+	return false
+}

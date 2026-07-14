@@ -33,6 +33,7 @@ var (
 	_ api.DrainSpec
 	_ api.DrainMetadata
 	_ api.DrainStrategy
+	_ api.NodePool
 )
 
 // Method / constructor signature pins (method expressions; receiver never evaluated).
@@ -50,6 +51,12 @@ var (
 	_ = (*api.ACLTokens).BootstrapOpts
 	_ = (*api.Nodes).ToggleEligibility
 	_ = (*api.Nodes).UpdateDrain
+	_ = (*api.Client).NodePools
+	_ = (*api.NodePools).Info
+	_ = (*api.NodePools).Register
+	_ = (*api.NodePools).Delete
+	_ = (*api.NodePools).ListNodes
+	_ = (*api.NodePools).ListJobs
 	_ = (*api.QueryOptions).WithContext
 	_ = (*api.WriteOptions).WithContext
 	_ = api.UnexpectedResponseError.StatusCode
