@@ -34,6 +34,12 @@ var (
 	_ api.DrainMetadata
 	_ api.DrainStrategy
 	_ api.NodePool
+	_ api.Job
+	_ api.JobPlanResponse
+	_ api.JobDiff
+	_ api.JobRegisterResponse
+	_ api.JobSummary
+	_ api.TaskGroupSummary
 )
 
 // Method / constructor signature pins (method expressions; receiver never evaluated).
@@ -57,6 +63,12 @@ var (
 	_ = (*api.NodePools).Delete
 	_ = (*api.NodePools).ListNodes
 	_ = (*api.NodePools).ListJobs
+	_ = (*api.Client).Jobs
+	_ = (*api.Jobs).Info
+	_ = (*api.Jobs).Plan
+	_ = (*api.Jobs).Register
+	_ = (*api.Jobs).Deregister
+	_ = (*api.Jobs).Summary
 	_ = (*api.QueryOptions).WithContext
 	_ = (*api.WriteOptions).WithContext
 	_ = api.UnexpectedResponseError.StatusCode
