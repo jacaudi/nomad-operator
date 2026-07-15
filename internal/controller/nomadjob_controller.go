@@ -17,9 +17,14 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 
+	"github.com/hashicorp/nomad/api"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,6 +44,31 @@ const (
 	jobResync         = 60 * time.Second
 	nomadJobFinalizer = "nomad.operator.io/nomadjob-cleanup"
 )
+
+// errJobIDMismatch is returned by decodeJob when spec.job carries an explicit
+// id that disagrees with spec.jobID (spec.jobID is authoritative).
+var errJobIDMismatch = errors.New("job.id does not match spec.jobID")
+
+// decodeJob strict-decodes spec.job (JSON in RawExtension.Raw) into an api.Job,
+// then injects the authoritative identity and region. DisallowUnknownFields
+// turns a typo'd/unknown key or a wrong-scalar-type (incl. an HCL-style duration
+// string, which time.Duration rejects — it wants integer nanoseconds) into an
+// error the reconciler surfaces as InvalidJobSpec. A blob id that disagrees with
+// spec.jobID is rejected (JobIDMismatch); otherwise spec.jobID wins.
+func decodeJob(spec nomadv1alpha1.NomadJobSpec, region string) (*api.Job, error) {
+	dec := json.NewDecoder(bytes.NewReader(spec.Job.Raw))
+	dec.DisallowUnknownFields()
+	var job api.Job
+	if err := dec.Decode(&job); err != nil {
+		return nil, fmt.Errorf("decode spec.job: %w", err)
+	}
+	if job.ID != nil && *job.ID != "" && *job.ID != spec.JobID {
+		return nil, fmt.Errorf("%w: job.id=%q spec.jobID=%q", errJobIDMismatch, *job.ID, spec.JobID)
+	}
+	job.ID = &spec.JobID
+	job.Region = &region
+	return &job, nil
+}
 
 // NomadJobReconciler manages Nomad jobs declared as NomadJob CRs. The CR is the
 // source of truth: the operator strict-decodes spec.job, Registers it onto Nomad
