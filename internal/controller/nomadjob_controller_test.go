@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"github.com/hashicorp/nomad/api"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -280,6 +281,45 @@ var _ = Describe("NomadJob reconciler: apply", func() {
 		var got string
 		Eventually(rec.Events).Should(Receive(&got))
 		Expect(got).To(ContainSubstring("deprecated x"))
+	})
+})
+
+var _ = Describe("NomadJob reconciler: status", func() {
+	It("mirrors jobStatus, jobVersion, and per-group running/desired into status", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-status-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		f := newFakeJobOps()
+		// planChanged=false so NO Register runs: the fake's RegisterJob would
+		// overwrite f.jobs["web"] with the decoded desired job (which has no
+		// server-set Status/Version), clobbering the seed below and making GetJob
+		// return a statusless job (SGE plan-review I-1). With no Register, the seeded
+		// job survives and GetJob returns running/4.
+		f.planChanged = false
+		status, ver := "running", uint64(4)
+		f.jobs["web"] = &api.Job{Status: &status, Version: &ver}
+		f.summary["app"] = api.TaskGroupSummary{Running: 2}
+
+		nj := &nomadv1alpha1.NomadJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadJobSpec{
+				ClusterRef: nomadv1alpha1.JobClusterRef{Name: nc.Name},
+				JobID:      "web",
+				Job:        runtime.RawExtension{Raw: []byte(`{"type":"service","taskGroups":[{"name":"app","count":3}]}`)},
+			},
+		}
+		Expect(k8s.Create(ctx, nj)).To(Succeed())
+
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got nomadv1alpha1.NomadJob
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "web", Namespace: ns.Name}, &got)).To(Succeed())
+		Expect(got.Status.JobStatus).To(Equal("running"))
+		Expect(got.Status.JobVersion).To(Equal(int64(4)))
+		Expect(got.Status.Groups["app"]).To(Equal(nomadv1alpha1.NomadJobGroupStatus{Running: 2, Desired: 3}))
 	})
 })
 

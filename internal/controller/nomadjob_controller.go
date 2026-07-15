@@ -184,6 +184,40 @@ func (r *NomadJobReconciler) reconcileJob(ctx context.Context, nj *nomadv1alpha1
 		}
 	}
 
+	// Derive bounded runtime status (managed, not a deep mirror).
+	info, err := ops.GetJob(ctx, nj.Spec.JobID)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if info != nil {
+		if info.Status != nil {
+			nj.Status.JobStatus = *info.Status
+		}
+		if info.Version != nil {
+			nj.Status.JobVersion = int64(*info.Version)
+		}
+	}
+	summary, err := ops.JobGroupSummary(ctx, nj.Spec.JobID)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	groups := make(map[string]nomadv1alpha1.NomadJobGroupStatus, len(desired.TaskGroups))
+	for _, g := range desired.TaskGroups {
+		name := ""
+		if g.Name != nil {
+			name = *g.Name
+		}
+		gs := nomadv1alpha1.NomadJobGroupStatus{}
+		if g.Count != nil {
+			gs.Desired = *g.Count
+		}
+		if s, ok := summary[name]; ok {
+			gs.Running = s.Running
+		}
+		groups[name] = gs
+	}
+	nj.Status.Groups = groups
+
 	setJobCondition(nj, nomadv1alpha1.NomadJobCondReady, metav1.ConditionTrue, nomadv1alpha1.ReasonRegistered, "job registered onto Nomad")
 	nj.Status.ObservedGeneration = nj.Generation
 	if err := r.Status().Update(ctx, nj); err != nil {
