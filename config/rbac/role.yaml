@@ -56,6 +56,7 @@ rules:
   - nomad.operator.io
   resources:
   - nomadclusters
+  - nomadjobs
   - nomadnodes
   - nomadpools
   verbs:
@@ -70,6 +71,7 @@ rules:
   - nomad.operator.io
   resources:
   - nomadclusters/finalizers
+  - nomadjobs/finalizers
   - nomadpools/finalizers
   verbs:
   - update
@@ -77,6 +79,7 @@ rules:
   - nomad.operator.io
   resources:
   - nomadclusters/status
+  - nomadjobs/status
   - nomadnodes/status
   - nomadpools/status
   verbs:
