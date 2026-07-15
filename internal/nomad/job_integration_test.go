@@ -10,10 +10,14 @@ import (
 
 // TestJobLifecycleLive exercises the full job surface against a real Nomad
 // (skips when no binary/endpoint is available, matching the other integration
-// tests). It resolves the design's two remaining plan-time opens:
-//   - §6.3: whether a second identical Register creates a new Version (if it
-//     no-ops, Plan-gating is a KISS-optional optimization; if it churns, keep it).
-//   - §6.4: Deregister on a missing job returns success/404, not an opaque error.
+// tests). It resolves the design's two remaining plan-time opens.
+//
+// Live outcome against Nomad v2.0.4 (rev 5b83b133998a, run 2026-07-15):
+//   - §6.3 RESOLVED: an identical re-Register does NOT advance Version
+//     (0 -> 0) and Plan(identical).changed == false. Register self-dedups, so
+//     Plan-gating is a KISS-optional optimization, not a correctness requirement.
+//   - §6.4 RESOLVED: Deregister(purge) on a now-missing job returns no error,
+//     and GetJob on a missing id returns (nil, nil) via the 404 mapping.
 func TestJobLifecycleLive(t *testing.T) {
 	// devAgentWithNode(t) is the existing harness in client_write_integration_test.go
 	// (starts a real `nomad agent -dev`, registers a node, returns (*Client, nodeID),
@@ -25,10 +29,25 @@ func TestJobLifecycleLive(t *testing.T) {
 	id := "operator-it-job"
 	region := "global"
 	typ := "service"
-	// A trivial always-runnable job is driver-dependent; if the dev agent lacks a
-	// usable driver, keep the assertions to Register/Plan/Deregister acceptance
-	// (scheduling health is out of scope for this client-level spike).
-	job := &api.Job{ID: &id, Name: &id, Region: &region, Type: &typ}
+	grp := "app"
+	count := 1
+	// A structurally valid job (Nomad rejects a job with no task groups at
+	// Register with "Missing job task groups"). The task uses raw_exec (healthy
+	// in `nomad agent -dev`) with a trivial command — Register only validates
+	// structure, so placement/scheduling health is out of scope for this
+	// client-level spike.
+	job := &api.Job{
+		ID: &id, Name: &id, Region: &region, Type: &typ,
+		TaskGroups: []*api.TaskGroup{{
+			Name:  &grp,
+			Count: &count,
+			Tasks: []*api.Task{{
+				Name:   "noop",
+				Driver: "raw_exec",
+				Config: map[string]any{"command": "/bin/sleep", "args": []string{"3600"}},
+			}},
+		}},
+	}
 
 	// First register.
 	if _, err := c.RegisterJob(ctx, job); err != nil {
