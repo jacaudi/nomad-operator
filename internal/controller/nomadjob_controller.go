@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
+	"github.com/jacaudi/nomad-operator/internal/nomad"
 )
 
 const (
@@ -226,10 +227,56 @@ func (r *NomadJobReconciler) reconcileJob(ctx context.Context, nj *nomadv1alpha1
 	return ctrl.Result{RequeueAfter: jobResync}, nil
 }
 
-// finalizeJob handles CR deletion. Filled in Task 8.
+// finalizeJob deregisters the Nomad job when the CR is deleted, gated so it
+// never deadlocks a cascade: if the cluster is gone OR going (DeletionTimestamp
+// set), there is nothing to clean up (the control plane is gone/going too), so
+// drop the finalizer without calling Deregister. This closes both background and
+// foreground cascade (design §3.5, reusing the NomadPool pattern). A job
+// Deregister is never refused for "non-emptiness" (stopping a job stops its
+// allocations), so there is no PoolNotEmpty-style blocked branch.
 func (r *NomadJobReconciler) finalizeJob(ctx context.Context, nj *nomadv1alpha1.NomadJob) (ctrl.Result, error) {
-	controllerutil.RemoveFinalizer(nj, nomadJobFinalizer)
-	return ctrl.Result{}, r.Update(ctx, nj)
+	if !controllerutil.ContainsFinalizer(nj, nomadJobFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	var nc nomadv1alpha1.NomadCluster
+	err := r.Get(ctx, types.NamespacedName{Name: nj.Spec.ClusterRef.Name, Namespace: nj.Namespace}, &nc)
+	clusterGoneOrGoing := apierrors.IsNotFound(err) || (err == nil && !nc.DeletionTimestamp.IsZero())
+	if clusterGoneOrGoing {
+		return ctrl.Result{}, r.dropJobFinalizer(ctx, nj)
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if nc.Status.Phase != nomadv1alpha1.PhaseReady {
+		// Cluster present, not deleting, but unreachable — do NOT orphan on a blip.
+		setJobCondition(nj, nomadv1alpha1.NomadJobCondDeleteBlocked, metav1.ConditionTrue, nomadv1alpha1.ReasonClusterNotReady, "cluster not Ready; cannot confirm job deregistration")
+		if uerr := r.Status().Update(ctx, nj); uerr != nil {
+			return ctrl.Result{}, uerr
+		}
+		return ctrl.Result{RequeueAfter: jobResync}, nil
+	}
+
+	cfg, err := clusterNomadConfig(ctx, r.Client, &nc)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	ops, err := r.NewNomadClient(cfg)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// purge=true: the CR going away means the job should not exist; a lingering
+	// dead record would collide with a future re-create of the same jobID.
+	if derr := ops.DeregisterJob(ctx, nj.Spec.JobID, true); derr != nil && !nomad.IsNotFound(derr) {
+		setJobCondition(nj, nomadv1alpha1.NomadJobCondDeleteBlocked, metav1.ConditionTrue, nomadv1alpha1.ReasonDeregisterFailed, derr.Error())
+		if uerr := r.Status().Update(ctx, nj); uerr != nil {
+			return ctrl.Result{}, uerr
+		}
+		return ctrl.Result{RequeueAfter: jobResync}, nil
+	}
+	// Deregister succeeded OR the job was already gone (404) — drop the finalizer.
+	return ctrl.Result{}, r.dropJobFinalizer(ctx, nj)
 }
 
 // dropJobFinalizer removes the cleanup finalizer, allowing Kubernetes to garbage

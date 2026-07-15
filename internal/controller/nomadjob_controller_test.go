@@ -1,11 +1,14 @@
 package controller
 
 import (
+	"errors"
+
 	"github.com/hashicorp/nomad/api"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -323,6 +326,128 @@ var _ = Describe("NomadJob reconciler: status", func() {
 	})
 })
 
+var _ = Describe("NomadJob reconciler: finalize", func() {
+	It("deregisters with purge and removes the finalizer on successful delete", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-del-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		f := newFakeJobOps()
+		f.jobs["web"] = &api.Job{}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+
+		nj := &nomadv1alpha1.NomadJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name, Finalizers: []string{nomadJobFinalizer}},
+			Spec: nomadv1alpha1.NomadJobSpec{
+				ClusterRef: nomadv1alpha1.JobClusterRef{Name: nc.Name},
+				JobID:      "web",
+				Job:        minimalJobRaw(),
+			},
+		}
+		Expect(k8s.Create(ctx, nj)).To(Succeed())
+		mustDelete(ctx, nj)
+
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.deregistered).To(Equal([]string{"web"}), "job not deregistered from Nomad")
+		Expect(f.purged).To(Equal([]bool{true}), "Deregister must purge so a re-created jobID does not collide with a dead record")
+		assertGoneJob(ctx, ns.Name, "web")
+	})
+
+	It("drops the finalizer without calling Deregister when the cluster is gone or going (foreground cascade)", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-clustergoing-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := mustCreateTerminatingCluster(ctx, ns.Name)
+
+		f := newFakeJobOps()
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+
+		nj := &nomadv1alpha1.NomadJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name, Finalizers: []string{nomadJobFinalizer}},
+			Spec: nomadv1alpha1.NomadJobSpec{
+				ClusterRef: nomadv1alpha1.JobClusterRef{Name: nc.Name},
+				JobID:      "web",
+				Job:        minimalJobRaw(),
+			},
+		}
+		Expect(k8s.Create(ctx, nj)).To(Succeed())
+		mustDelete(ctx, nj)
+
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.deregistered).To(BeEmpty(), "must NOT call Deregister when the cluster is going away")
+		assertGoneJob(ctx, ns.Name, "web")
+	})
+
+	It("holds the finalizer, sets DeleteBlocked/ClusterNotReady, and does not call Deregister when the cluster is present but not Ready", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-delnotready-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		nc.Status.Phase = nomadv1alpha1.PhaseDegraded // present, not deleting, but not Ready
+		Expect(k8s.Status().Update(ctx, nc)).To(Succeed())
+
+		f := newFakeJobOps()
+		f.jobs["web"] = &api.Job{}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+
+		nj := &nomadv1alpha1.NomadJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name, Finalizers: []string{nomadJobFinalizer}},
+			Spec: nomadv1alpha1.NomadJobSpec{
+				ClusterRef: nomadv1alpha1.JobClusterRef{Name: nc.Name},
+				JobID:      "web",
+				Job:        minimalJobRaw(),
+			},
+		}
+		Expect(k8s.Create(ctx, nj)).To(Succeed())
+		mustDelete(ctx, nj)
+
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got nomadv1alpha1.NomadJob
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "web", Namespace: ns.Name}, &got)).To(Succeed())
+		Expect(controllerutil.ContainsFinalizer(&got, nomadJobFinalizer)).To(BeTrue(), "finalizer must be held while the cluster is not Ready")
+		cond := meta.FindStatusCondition(got.Status.Conditions, nomadv1alpha1.NomadJobCondDeleteBlocked)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonClusterNotReady))
+		Expect(f.deregistered).To(BeEmpty(), "must not call Deregister while the cluster is not Ready (don't orphan on a blip)")
+	})
+
+	It("holds the finalizer and sets DeleteBlocked/DeregisterFailed when Deregister fails", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-delblocked-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		f := newFakeJobOps()
+		f.jobs["web"] = &api.Job{}
+		f.deregisterErr = errors.New("boom")
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+
+		nj := &nomadv1alpha1.NomadJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name, Finalizers: []string{nomadJobFinalizer}},
+			Spec: nomadv1alpha1.NomadJobSpec{
+				ClusterRef: nomadv1alpha1.JobClusterRef{Name: nc.Name},
+				JobID:      "web",
+				Job:        minimalJobRaw(),
+			},
+		}
+		Expect(k8s.Create(ctx, nj)).To(Succeed())
+		mustDelete(ctx, nj)
+
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got nomadv1alpha1.NomadJob
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "web", Namespace: ns.Name}, &got)).To(Succeed())
+		Expect(controllerutil.ContainsFinalizer(&got, nomadJobFinalizer)).To(BeTrue(), "finalizer must be held when Deregister fails")
+		cond := meta.FindStatusCondition(got.Status.Conditions, nomadv1alpha1.NomadJobCondDeleteBlocked)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonDeregisterFailed))
+	})
+})
+
 var _ = Describe("NomadJob reconciler: jobsForCluster mapper", func() {
 	It("returns exactly the jobs referencing the given cluster", func(ctx SpecContext) {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-mapper-"}}
@@ -355,3 +480,11 @@ var _ = Describe("NomadJob reconciler: jobsForCluster mapper", func() {
 		Expect(names).To(ConsistOf("job1", "job2"))
 	})
 })
+
+// assertGoneJob asserts the job CR no longer exists: the finalizer was removed
+// and Kubernetes garbage-collected the object (mirrors assertGonePool).
+func assertGoneJob(ctx SpecContext, ns, name string) {
+	var got nomadv1alpha1.NomadJob
+	err := k8s.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)
+	Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected job %s/%s to be gone, got: %v", ns, name, err)
+}
