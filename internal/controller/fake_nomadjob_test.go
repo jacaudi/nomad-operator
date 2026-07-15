@@ -1,0 +1,78 @@
+package controller
+
+import (
+	"context"
+
+	"github.com/hashicorp/nomad/api"
+
+	"github.com/jacaudi/nomad-operator/internal/nomad"
+)
+
+// fakeNomadJobOps is a scriptable NomadJobOps for envtest. Set the fields to
+// control behavior and inspect the recorded calls.
+type fakeNomadJobOps struct {
+	jobs        map[string]*api.Job             // seeded Info state, keyed by jobID
+	summary     map[string]api.TaskGroupSummary // JobGroupSummary result
+	planChanged bool                            // PlanJob result
+	warnings    string                          // RegisterJob warnings
+
+	getErr, planErr, registerErr, deregisterErr, summaryErr error
+
+	registered   []*api.Job // every RegisterJob arg, in order
+	deregistered []string   // every DeregisterJob jobID, in order
+	purged       []bool     // the purge flag for each DeregisterJob, in order
+}
+
+func newFakeJobOps() *fakeNomadJobOps {
+	return &fakeNomadJobOps{jobs: map[string]*api.Job{}, summary: map[string]api.TaskGroupSummary{}}
+}
+
+func (f *fakeNomadJobOps) GetJob(_ context.Context, jobID string) (*api.Job, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	return f.jobs[jobID], nil // nil == not found, matching the real 404 mapping
+}
+
+func (f *fakeNomadJobOps) PlanJob(_ context.Context, _ *api.Job) (bool, error) {
+	if f.planErr != nil {
+		return false, f.planErr
+	}
+	return f.planChanged, nil
+}
+
+func (f *fakeNomadJobOps) RegisterJob(_ context.Context, job *api.Job) (string, error) {
+	if f.registerErr != nil {
+		return "", f.registerErr
+	}
+	cp := *job
+	f.registered = append(f.registered, &cp)
+	if cp.ID != nil {
+		f.jobs[*cp.ID] = &cp
+	}
+	return f.warnings, nil
+}
+
+func (f *fakeNomadJobOps) DeregisterJob(_ context.Context, jobID string, purge bool) error {
+	if f.deregisterErr != nil {
+		return f.deregisterErr
+	}
+	f.deregistered = append(f.deregistered, jobID)
+	f.purged = append(f.purged, purge)
+	delete(f.jobs, jobID)
+	return nil
+}
+
+func (f *fakeNomadJobOps) JobGroupSummary(_ context.Context, _ string) (map[string]api.TaskGroupSummary, error) {
+	if f.summaryErr != nil {
+		return nil, f.summaryErr
+	}
+	return f.summary, nil
+}
+
+// factory returns a NomadJobClientFactory that always yields this fake.
+func (f *fakeNomadJobOps) factory() NomadJobClientFactory {
+	return func(_ nomad.Config) (NomadJobOps, error) { return f, nil }
+}
+
+var _ NomadJobOps = (*fakeNomadJobOps)(nil)
