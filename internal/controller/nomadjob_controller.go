@@ -151,9 +151,44 @@ func (r *NomadJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	return r.reconcileJob(ctx, &nj, ops, nc.Spec.Region)
 }
 
-// reconcileJob decodes spec.job, applies it onto Nomad, and derives status.
-// Filled in Tasks 6–7.
+// reconcileJob decodes spec.job, drift-gates the register via Plan, and derives
+// status. Status derivation (Task 7) is layered in before the Ready write.
 func (r *NomadJobReconciler) reconcileJob(ctx context.Context, nj *nomadv1alpha1.NomadJob, ops NomadJobOps, region string) (ctrl.Result, error) {
+	desired, err := decodeJob(nj.Spec, region)
+	if err != nil {
+		reason := nomadv1alpha1.ReasonInvalidJobSpec
+		if errors.Is(err, errJobIDMismatch) {
+			reason = nomadv1alpha1.ReasonJobIDMismatch
+		}
+		setJobCondition(nj, nomadv1alpha1.NomadJobCondReady, metav1.ConditionFalse, reason, err.Error())
+		nj.Status.ObservedGeneration = nj.Generation
+		if uerr := r.Status().Update(ctx, nj); uerr != nil {
+			return ctrl.Result{}, uerr
+		}
+		return ctrl.Result{RequeueAfter: jobResync}, nil
+	}
+
+	// Drift-gate the register on Plan's Diff.Type (never on FailedTGAllocs — an
+	// infeasible-but-changed job must still be registered so the user can fix it).
+	changed, err := ops.PlanJob(ctx, desired)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if changed {
+		warnings, err := ops.RegisterJob(ctx, desired)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if warnings != "" {
+			r.Recorder.Event(nj, "Normal", "RegisterWarnings", warnings)
+		}
+	}
+
+	setJobCondition(nj, nomadv1alpha1.NomadJobCondReady, metav1.ConditionTrue, nomadv1alpha1.ReasonRegistered, "job registered onto Nomad")
+	nj.Status.ObservedGeneration = nj.Generation
+	if err := r.Status().Update(ctx, nj); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{RequeueAfter: jobResync}, nil
 }
 

@@ -118,6 +118,171 @@ var _ = Describe("NomadJob reconciler: ownerRef + requeue", func() {
 	})
 })
 
+var _ = Describe("NomadJob reconciler: apply", func() {
+	It("registers the job when Plan reports a change and injects ID/Region", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-apply-change-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		f := newFakeJobOps()
+		f.planChanged = true
+
+		nj := &nomadv1alpha1.NomadJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadJobSpec{
+				ClusterRef: nomadv1alpha1.JobClusterRef{Name: nc.Name},
+				JobID:      "web",
+				Job:        runtime.RawExtension{Raw: []byte(`{"type":"service","taskGroups":[{"name":"app","count":1}]}`)},
+			},
+		}
+		Expect(k8s.Create(ctx, nj)).To(Succeed())
+
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(f.registered).To(HaveLen(1))
+		Expect(f.registered[0].ID).NotTo(BeNil())
+		Expect(*f.registered[0].ID).To(Equal("web"))
+		Expect(f.registered[0].Region).NotTo(BeNil())
+		Expect(*f.registered[0].Region).To(Equal("global"))
+
+		var got nomadv1alpha1.NomadJob
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "web", Namespace: ns.Name}, &got)).To(Succeed())
+		cond := meta.FindStatusCondition(got.Status.Conditions, nomadv1alpha1.NomadJobCondReady)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonRegistered))
+		Expect(got.Status.ObservedGeneration).To(Equal(got.Generation))
+	})
+
+	It("skips Register when Plan reports no change but still reports Ready", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-apply-nochange-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		f := newFakeJobOps()
+		f.planChanged = false
+
+		nj := &nomadv1alpha1.NomadJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadJobSpec{
+				ClusterRef: nomadv1alpha1.JobClusterRef{Name: nc.Name},
+				JobID:      "web",
+				Job:        minimalJobRaw(),
+			},
+		}
+		Expect(k8s.Create(ctx, nj)).To(Succeed())
+
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(f.registered).To(BeEmpty(), "must not register when Plan shows no drift")
+
+		var got nomadv1alpha1.NomadJob
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "web", Namespace: ns.Name}, &got)).To(Succeed())
+		cond := meta.FindStatusCondition(got.Status.Conditions, nomadv1alpha1.NomadJobCondReady)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonRegistered))
+	})
+
+	It("sets InvalidJobSpec and registers nothing when spec.job has an unknown key", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-apply-invalid-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		f := newFakeJobOps()
+		f.planChanged = true // proves the decode gate short-circuits before Plan/Register
+
+		nj := &nomadv1alpha1.NomadJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadJobSpec{
+				ClusterRef: nomadv1alpha1.JobClusterRef{Name: nc.Name},
+				JobID:      "web",
+				Job:        runtime.RawExtension{Raw: []byte(`{"taskGropus":[]}`)},
+			},
+		}
+		Expect(k8s.Create(ctx, nj)).To(Succeed())
+
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(f.registered).To(BeEmpty())
+
+		var got nomadv1alpha1.NomadJob
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "web", Namespace: ns.Name}, &got)).To(Succeed())
+		cond := meta.FindStatusCondition(got.Status.Conditions, nomadv1alpha1.NomadJobCondReady)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonInvalidJobSpec))
+		Expect(got.Status.ObservedGeneration).To(Equal(got.Generation))
+	})
+
+	It("sets JobIDMismatch and registers nothing when spec.job.id disagrees with spec.jobID", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-apply-mismatch-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		f := newFakeJobOps()
+		f.planChanged = true
+
+		nj := &nomadv1alpha1.NomadJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadJobSpec{
+				ClusterRef: nomadv1alpha1.JobClusterRef{Name: nc.Name},
+				JobID:      "web",
+				Job:        runtime.RawExtension{Raw: []byte(`{"id":"other"}`)},
+			},
+		}
+		Expect(k8s.Create(ctx, nj)).To(Succeed())
+
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(f.registered).To(BeEmpty())
+
+		var got nomadv1alpha1.NomadJob
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "web", Namespace: ns.Name}, &got)).To(Succeed())
+		cond := meta.FindStatusCondition(got.Status.Conditions, nomadv1alpha1.NomadJobCondReady)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonJobIDMismatch))
+	})
+
+	It("emits a RegisterWarnings event when Register returns warnings", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-apply-warn-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		f := newFakeJobOps()
+		f.planChanged = true
+		f.warnings = "deprecated x"
+
+		nj := &nomadv1alpha1.NomadJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadJobSpec{
+				ClusterRef: nomadv1alpha1.JobClusterRef{Name: nc.Name},
+				JobID:      "web",
+				Job:        minimalJobRaw(),
+			},
+		}
+		Expect(k8s.Create(ctx, nj)).To(Succeed())
+
+		rec := record.NewFakeRecorder(10)
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: rec}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got string
+		Eventually(rec.Events).Should(Receive(&got))
+		Expect(got).To(ContainSubstring("deprecated x"))
+	})
+})
+
 var _ = Describe("NomadJob reconciler: jobsForCluster mapper", func() {
 	It("returns exactly the jobs referencing the given cluster", func(ctx SpecContext) {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-mapper-"}}
