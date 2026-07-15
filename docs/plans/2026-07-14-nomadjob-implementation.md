@@ -22,6 +22,8 @@
 
 **Design:** `docs/designs/2026-07-14-nomadjob-design.md` (amended after Fable SGE review).
 
+> **Amended 2026-07-14** after an independent Fable sr-go-engineer *plan* review (verdict *amend-before-execution*; no rework — all API signatures/types, the six Task-5 decode assertions, CRD markers, contract pins, finalizer reuse, and harness accuracy verified sound against the pinned `api` source + a live decode program). Folded: **I-1** (Task 7) — the status test used `f.planChanged = true`, so the fake's `RegisterJob` overwrote the seeded `f.jobs["web"]` with the statusless *desired* job and `GetJob` returned no status → the test now sets `f.planChanged = false` (no Register, seed survives). **M-1** (Task 10) — the integration snippet called a non-existent `newIntegrationClient`; it now uses the real `devAgentWithNode(t)` harness from `client_write_integration_test.go`. **M-2** (Task 1) — `job_test.go` now reuses the existing `newTestClient` from `nodepool_test.go` instead of redefining it. **M-3 (note):** the controller test file accrues `errors` (Task 8) and `apierrors` (Task 8 `assertGoneJob`) imports across tasks — `goimports`/the build gate resolves them; don't be surprised running a single task's tests in isolation. **M-4 (confirmed sound, no change):** the client methods rely on `nomad.New` mapping `cfg.Region → api.Config.Region` (client default) plus `job.Region` injection rather than setting `WriteOptions.Region` per call — functionally equivalent to design §3.7 and DRY-cleaner.
+
 ## Global Constraints
 
 - **Per-endpoint Nomad client only.** Build via `clusterNomadConfig` (`internal/controller/nomadclient.go`); never a singleton, never `api.DefaultConfig()`. `nomad.New` maps `cfg.Region`→`api.Config.Region`, so read/write requests default to the cluster region automatically; the reconciler *additionally* injects `job.Region` (SGE M-3).
@@ -96,32 +98,22 @@ Each per-task snippet specifies the **behavior to assert**; port it into a Ginkg
 
 - [ ] **Step 1: Write the failing unit tests**
 
-Create `internal/nomad/job_test.go`. Point a **real** `*Client` at an `httptest.Server` (mirrors the slice-4 `nodepool_test.go` pattern; `newTestClient` may already exist there — reuse it if so, otherwise add this local copy):
+Create `internal/nomad/job_test.go`. **Reuse the existing `newTestClient(t, h)` helper** already defined in `internal/nomad/nodepool_test.go` (same package — do NOT redefine it; SGE plan-review M-2). It points a **real** `*Client` at an `httptest.Server`:
 
 ```go
 package nomad
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/hashicorp/nomad/api"
 )
 
-func newJobTestClient(t *testing.T, h http.HandlerFunc) *Client {
-	t.Helper()
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
-	c, err := New(Config{Address: srv.URL})
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-	return c
-}
+// newTestClient(t, h) lives in nodepool_test.go (same package) — reuse it.
 
 func TestGetJob_NotFound(t *testing.T) {
-	c := newJobTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "job not found", http.StatusNotFound)
 	})
 	job, err := c.GetJob(t.Context(), "missing")
@@ -132,7 +124,7 @@ func TestGetJob_NotFound(t *testing.T) {
 
 func TestPlanJob_ChangedAndNone(t *testing.T) {
 	diffType := "Added"
-	c := newJobTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"Diff":{"Type":"` + diffType + `"}}`))
 	})
@@ -149,7 +141,7 @@ func TestPlanJob_ChangedAndNone(t *testing.T) {
 }
 
 func TestRegisterJob_Warnings(t *testing.T) {
-	c := newJobTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"EvalID":"e1","Warnings":"deprecated foo"}`))
 	})
@@ -161,7 +153,7 @@ func TestRegisterJob_Warnings(t *testing.T) {
 }
 
 func TestJobGroupSummary(t *testing.T) {
-	c := newJobTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"JobID":"web","Summary":{"app":{"Running":2,"Starting":1}}}`))
 	})
@@ -175,7 +167,7 @@ func TestJobGroupSummary(t *testing.T) {
 }
 
 func TestDeregisterJob_OK(t *testing.T) {
-	c := newJobTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"EvalID":"e1"}`))
 	})
@@ -1196,7 +1188,12 @@ It("mirrors jobStatus, jobVersion, and per-group running/desired into status", f
 	nc := readyCluster(ctx, ns.Name)
 
 	f := newFakeJobOps()
-	f.planChanged = true
+	// planChanged=false so NO Register runs: the fake's RegisterJob would
+	// overwrite f.jobs["web"] with the decoded desired job (which has no
+	// server-set Status/Version), clobbering the seed below and making GetJob
+	// return a statusless job (SGE plan-review I-1). With no Register, the seeded
+	// job survives and GetJob returns running/4.
+	f.planChanged = false
 	status, ver := "running", uint64(4)
 	f.jobs["web"] = &api.Job{Status: &status, Version: &ver}
 	f.summary["app"] = api.TaskGroupSummary{Running: 2}
@@ -1524,7 +1521,11 @@ import (
 //     no-ops, Plan-gating is a KISS-optional optimization; if it churns, keep it).
 //   - §6.4: Deregister on a missing job returns success/404, not an opaque error.
 func TestJobLifecycleLive(t *testing.T) {
-	c := newIntegrationClient(t) // same harness helper the other *_integration_test.go use
+	// devAgentWithNode(t) is the existing harness in client_write_integration_test.go
+	// (starts a real `nomad agent -dev`, registers a node, returns (*Client, nodeID),
+	// and skips when no nomad binary is present). Reuse it — do NOT invent a helper
+	// (SGE plan-review M-1).
+	c, _ := devAgentWithNode(t)
 
 	ctx := t.Context()
 	id := "operator-it-job"
