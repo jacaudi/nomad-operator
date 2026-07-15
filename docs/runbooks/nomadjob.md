@@ -99,7 +99,8 @@ bump the job version. Register is Nomad's upsert, so an update is the same call
 as a create — gated by the plan.
 
 Register warnings from Nomad (e.g. deprecation notices) are surfaced as a
-Warning event on the CR; they do not fail the reconcile.
+`Normal` event (Reason `RegisterWarnings`) on the CR; they do not fail the
+reconcile.
 
 ## Deletion semantics — the finalizer deregisters with `purge=true`
 `kubectl delete nomadjob <name>` does **not** delete instantly. The operator

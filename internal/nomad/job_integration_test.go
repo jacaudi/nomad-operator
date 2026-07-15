@@ -69,6 +69,9 @@ func TestJobLifecycleLive(t *testing.T) {
 		t.Fatalf("plan: %v", err)
 	}
 	t.Logf("§6.3 spike: Plan(identical).changed = %v", changed)
+	if changed {
+		t.Fatalf("§6.3: Plan(identical).changed = true, want false — an identical re-plan must report no change; the decision to keep the Plan gate rests on Nomad self-dedup'ing an identical job, and this premise has regressed")
+	}
 
 	// Second identical register → does Version advance? (§6.3)
 	if _, err := c.RegisterJob(ctx, job); err != nil {
@@ -79,6 +82,9 @@ func TestJobLifecycleLive(t *testing.T) {
 		t.Fatalf("get2: %v", err)
 	}
 	t.Logf("§6.3 spike: Version before=%v after identical re-register=%v (equal ⇒ Register self-dedups ⇒ Plan-gating is optional)", deref(v1), deref(got2.Version))
+	if deref(v1) != deref(got2.Version) {
+		t.Fatalf("§6.3: Version advanced on an identical re-register (before=%v after=%v) — Register no longer self-dedups; the Plan-gate keep-decision premise has regressed", deref(v1), deref(got2.Version))
+	}
 
 	// Deregister with purge, then Deregister the now-missing job (§6.4).
 	if err := c.DeregisterJob(ctx, id, true); err != nil {

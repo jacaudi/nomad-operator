@@ -37,6 +37,21 @@ func TestPlanJob_ChangedAndNone(t *testing.T) {
 	}
 }
 
+func TestPlanJob_NilDiffTreatedAsChanged(t *testing.T) {
+	// A Plan response with no Diff field (Nomad returns no computed diff) must
+	// take PlanJob's documented safe fallback: treat as changed so the job is
+	// still Registered (at worst one extra upsert), never silently skipped.
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	})
+	id := "web"
+	changed, err := c.PlanJob(t.Context(), &api.Job{ID: &id})
+	if err != nil || !changed {
+		t.Fatalf("PlanJob nil-Diff = (%v, %v), want (true, nil)", changed, err)
+	}
+}
+
 func TestRegisterJob_Warnings(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

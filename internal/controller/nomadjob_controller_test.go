@@ -2,6 +2,8 @@ package controller
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 
 	"github.com/hashicorp/nomad/api"
 	. "github.com/onsi/ginkgo/v2"
@@ -18,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
+	"github.com/jacaudi/nomad-operator/internal/nomad"
 )
 
 // minimalJobRaw is a valid schemaless spec.job payload for skeleton tests. The
@@ -255,6 +258,7 @@ var _ = Describe("NomadJob reconciler: apply", func() {
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonJobIDMismatch))
+		Expect(got.Status.ObservedGeneration).To(Equal(got.Generation), "observedGeneration must advance on the JobIDMismatch decode-error write (parity with InvalidJobSpec)")
 	})
 
 	It("emits a RegisterWarnings event when Register returns warnings", func(ctx SpecContext) {
@@ -284,6 +288,7 @@ var _ = Describe("NomadJob reconciler: apply", func() {
 		var got string
 		Eventually(rec.Events).Should(Receive(&got))
 		Expect(got).To(ContainSubstring("deprecated x"))
+		Expect(got).To(ContainSubstring("RegisterWarnings"), "the event Reason must be RegisterWarnings; a changed Reason or event type is a regression")
 	})
 })
 
@@ -445,6 +450,78 @@ var _ = Describe("NomadJob reconciler: finalize", func() {
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonDeregisterFailed))
+	})
+
+	It("drops the finalizer without calling Deregister when the referenced cluster no longer exists (background cascade)", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-clustergone-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+
+		// No cluster is created: clusterRef points at a name that does not exist,
+		// so finalizeJob's apierrors.IsNotFound disjunct fires. This is the
+		// background-cascade / cluster-fully-gone path — distinct from the
+		// terminating-cluster spec above, which exercises the DeletionTimestamp
+		// disjunct.
+		f := newFakeJobOps()
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+
+		nj := &nomadv1alpha1.NomadJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name, Finalizers: []string{nomadJobFinalizer}},
+			Spec: nomadv1alpha1.NomadJobSpec{
+				ClusterRef: nomadv1alpha1.JobClusterRef{Name: "missing"},
+				JobID:      "web",
+				Job:        minimalJobRaw(),
+			},
+		}
+		Expect(k8s.Create(ctx, nj)).To(Succeed())
+		mustDelete(ctx, nj)
+
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.deregistered).To(BeEmpty(), "cluster is gone; there is nothing to deregister")
+		assertGoneJob(ctx, ns.Name, "web")
+	})
+
+	It("tolerates a 404 from Deregister (job already gone) and completes deletion without DeleteBlocked", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-del404-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		// api.UnexpectedResponseError has unexported fields and no exported
+		// constructor, so a genuine 404 cannot be built directly. Obtain one the
+		// way internal/nomad's own tests do — drive a real client against a 404 —
+		// so this exercises IsNotFound's real error type, not a stand-in.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "job not found", http.StatusNotFound)
+		}))
+		DeferCleanup(srv.Close)
+		nomadClient, err := nomad.New(nomad.Config{Address: srv.URL})
+		Expect(err).NotTo(HaveOccurred())
+		notFound := nomadClient.DeregisterJob(ctx, "web", true)
+		Expect(nomad.IsNotFound(notFound)).To(BeTrue(), "sanity: the seeded error must be a real, non-nil 404 that satisfies nomad.IsNotFound")
+
+		f := newFakeJobOps()
+		f.jobs["web"] = &api.Job{}
+		f.deregisterErr = notFound
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+
+		nj := &nomadv1alpha1.NomadJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name, Finalizers: []string{nomadJobFinalizer}},
+			Spec: nomadv1alpha1.NomadJobSpec{
+				ClusterRef: nomadv1alpha1.JobClusterRef{Name: nc.Name},
+				JobID:      "web",
+				Job:        minimalJobRaw(),
+			},
+		}
+		Expect(k8s.Create(ctx, nj)).To(Succeed())
+		mustDelete(ctx, nj)
+
+		_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		// An already-gone job (404) is treated as success: the finalizer is dropped
+		// and the CR is GC'd. Had the 404 been treated as a DeregisterFailed, the
+		// finalizer would be held and the CR would still exist — so GC is the proof
+		// that no DeleteBlocked/DeregisterFailed path was taken.
+		assertGoneJob(ctx, ns.Name, "web")
 	})
 })
 
