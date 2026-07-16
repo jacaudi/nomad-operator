@@ -4,6 +4,7 @@ import (
 	"context"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -52,6 +53,13 @@ func (r *NomadClusterReconciler) ensureLoadBalancer(ctx context.Context, nc *nom
 	}
 	var current corev1.Service
 	if err := r.Get(ctx, client.ObjectKeyFromObject(svc), &current); err != nil {
+		// On first creation the informer cache may not yet have observed the
+		// just-applied Service, so the read-back returns NotFound. Treat that as
+		// "not ready yet" and requeue cleanly (same as no ingress assigned)
+		// rather than surfacing a spurious reconcile error.
+		if apierrors.IsNotFound(err) {
+			return "", false, nil
+		}
 		return "", false, err
 	}
 	for _, ing := range current.Status.LoadBalancer.Ingress {
