@@ -269,3 +269,37 @@ var _ = Describe("NomadNamespace reconciler: finalize", func() {
 		Expect(apierrors.IsNotFound(k8s.Get(ctx, types.NamespacedName{Name: nn.Name, Namespace: ns.Name}, &got))).To(BeTrue())
 	})
 })
+
+var _ = Describe("NomadNamespace CEL", func() {
+	It("rejects namespaceName 'default'", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-cel-default-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nn := &nomadv1alpha1.NomadNamespace{
+			ObjectMeta: metav1.ObjectMeta{Name: "d", Namespace: ns.Name},
+			Spec:       nomadv1alpha1.NomadNamespaceSpec{ClusterRef: nomadv1alpha1.NamespaceClusterRef{Name: "c"}, NamespaceName: "default"},
+		}
+		Expect(k8s.Create(ctx, nn)).NotTo(Succeed())
+	})
+
+	It("rejects a namespaceName with illegal characters", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-cel-pattern-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nn := &nomadv1alpha1.NomadNamespace{
+			ObjectMeta: metav1.ObjectMeta{Name: "bad", Namespace: ns.Name},
+			Spec:       nomadv1alpha1.NomadNamespaceSpec{ClusterRef: nomadv1alpha1.NamespaceClusterRef{Name: "c"}, NamespaceName: "has spaces!"},
+		}
+		Expect(k8s.Create(ctx, nn)).NotTo(Succeed())
+	})
+
+	It("rejects mutating namespaceName", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-cel-immutable-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nn := &nomadv1alpha1.NomadNamespace{
+			ObjectMeta: metav1.ObjectMeta{Name: "team-a", Namespace: ns.Name},
+			Spec:       nomadv1alpha1.NomadNamespaceSpec{ClusterRef: nomadv1alpha1.NamespaceClusterRef{Name: "c"}, NamespaceName: "team-a"},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+		nn.Spec.NamespaceName = "team-b"
+		Expect(k8s.Update(ctx, nn)).NotTo(Succeed())
+	})
+})
