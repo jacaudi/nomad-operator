@@ -28,9 +28,10 @@ const (
 	NomadJobCondReady         = "Ready"
 	NomadJobCondDeleteBlocked = "DeleteBlocked"
 
-	ReasonInvalidJobSpec   = "InvalidJobSpec"
-	ReasonJobIDMismatch    = "JobIDMismatch"
-	ReasonDeregisterFailed = "DeregisterFailed"
+	ReasonInvalidJobSpec    = "InvalidJobSpec"
+	ReasonJobIDMismatch     = "JobIDMismatch"
+	ReasonNamespaceMismatch = "NamespaceMismatch"
+	ReasonDeregisterFailed  = "DeregisterFailed"
 )
 
 // JobClusterRef names a NomadCluster in the same namespace.
@@ -46,6 +47,7 @@ type JobClusterRef struct {
 //
 // +kubebuilder:validation:XValidation:rule="self.jobID == oldSelf.jobID",message="jobID is immutable"
 // +kubebuilder:validation:XValidation:rule="self.clusterRef.name == oldSelf.clusterRef.name",message="clusterRef.name is immutable"
+// +kubebuilder:validation:XValidation:rule="self.nomadNamespace == oldSelf.nomadNamespace",message="nomadNamespace is immutable"
 type NomadJobSpec struct {
 	// ClusterRef names the NomadCluster (same namespace) this job runs on.
 	// +kubebuilder:validation:Required
@@ -57,6 +59,16 @@ type NomadJobSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9-_.]{1,128}$`
 	JobID string `json:"jobID"`
+	// NomadNamespace is the Nomad namespace (a Nomad-internal tenancy partition,
+	// NOT the Kubernetes namespace) this job is placed into. Immutable because
+	// Nomad job identity is (namespace, jobID). The named namespace must already
+	// exist (via a NomadNamespace CR, out-of-band, or the always-present
+	// "default"); the operator injects it as the authoritative job.Namespace, and
+	// a differing namespace inside spec.job is rejected.
+	// +optional
+	// +kubebuilder:default="default"
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9-_]{1,128}$`
+	NomadNamespace string `json:"nomadNamespace,omitempty"`
 	// Job is the Nomad jobspec expressed as the api.Job structure (camelCase or
 	// PascalCase; keys match api.Job case-insensitively). It is schemaless: the
 	// CRD does not model its fields, so there is no per-field validation — the

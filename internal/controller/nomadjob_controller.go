@@ -50,12 +50,19 @@ const (
 // id that disagrees with spec.jobID (spec.jobID is authoritative).
 var errJobIDMismatch = errors.New("job.id does not match spec.jobID")
 
+// errNamespaceMismatch is returned by decodeJob when spec.job carries an explicit
+// namespace that disagrees with spec.nomadNamespace (spec.nomadNamespace is authoritative).
+var errNamespaceMismatch = errors.New("job.namespace does not match spec.nomadNamespace")
+
 // decodeJob strict-decodes spec.job (JSON in RawExtension.Raw) into an api.Job,
 // then injects the authoritative identity and region. DisallowUnknownFields
 // turns a typo'd/unknown key or a wrong-scalar-type (incl. an HCL-style duration
 // string, which time.Duration rejects — it wants integer nanoseconds) into an
 // error the reconciler surfaces as InvalidJobSpec. A blob id that disagrees with
-// spec.jobID is rejected (JobIDMismatch); otherwise spec.jobID wins.
+// spec.jobID is rejected (JobIDMismatch), and a blob namespace that disagrees
+// with spec.nomadNamespace is rejected (NamespaceMismatch); otherwise spec wins
+// for both, and job.Namespace is injected authoritatively (Nomad identity is the
+// (namespace, jobID) pair).
 func decodeJob(spec nomadv1alpha1.NomadJobSpec, region string) (*api.Job, error) {
 	dec := json.NewDecoder(bytes.NewReader(spec.Job.Raw))
 	dec.DisallowUnknownFields()
@@ -66,8 +73,12 @@ func decodeJob(spec nomadv1alpha1.NomadJobSpec, region string) (*api.Job, error)
 	if job.ID != nil && *job.ID != "" && *job.ID != spec.JobID {
 		return nil, fmt.Errorf("%w: job.id=%q spec.jobID=%q", errJobIDMismatch, *job.ID, spec.JobID)
 	}
+	if job.Namespace != nil && *job.Namespace != "" && *job.Namespace != spec.NomadNamespace {
+		return nil, fmt.Errorf("%w: job.namespace=%q spec.nomadNamespace=%q", errNamespaceMismatch, *job.Namespace, spec.NomadNamespace)
+	}
 	job.ID = &spec.JobID
 	job.Region = &region
+	job.Namespace = &spec.NomadNamespace
 	return &job, nil
 }
 
@@ -160,6 +171,9 @@ func (r *NomadJobReconciler) reconcileJob(ctx context.Context, nj *nomadv1alpha1
 		reason := nomadv1alpha1.ReasonInvalidJobSpec
 		if errors.Is(err, errJobIDMismatch) {
 			reason = nomadv1alpha1.ReasonJobIDMismatch
+		}
+		if errors.Is(err, errNamespaceMismatch) {
+			reason = nomadv1alpha1.ReasonNamespaceMismatch
 		}
 		setJobCondition(nj, nomadv1alpha1.NomadJobCondReady, metav1.ConditionFalse, reason, err.Error())
 		nj.Status.ObservedGeneration = nj.Generation

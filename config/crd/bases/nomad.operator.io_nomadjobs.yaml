@@ -86,6 +86,17 @@ spec:
                   authoritative job.ID; a differing job.id inside spec.job is rejected.
                 pattern: ^[a-zA-Z0-9-_.]{1,128}$
                 type: string
+              nomadNamespace:
+                default: default
+                description: |-
+                  NomadNamespace is the Nomad namespace (a Nomad-internal tenancy partition,
+                  NOT the Kubernetes namespace) this job is placed into. Immutable because
+                  Nomad job identity is (namespace, jobID). The named namespace must already
+                  exist (via a NomadNamespace CR, out-of-band, or the always-present
+                  "default"); the operator injects it as the authoritative job.Namespace, and
+                  a differing namespace inside spec.job is rejected.
+                pattern: ^[a-zA-Z0-9-_]{1,128}$
+                type: string
             required:
             - clusterRef
             - job
@@ -96,6 +107,8 @@ spec:
               rule: self.jobID == oldSelf.jobID
             - message: clusterRef.name is immutable
               rule: self.clusterRef.name == oldSelf.clusterRef.name
+            - message: nomadNamespace is immutable
+              rule: self.nomadNamespace == oldSelf.nomadNamespace
           status:
             description: NomadJobStatus is the observed state, operator-owned.
             properties:

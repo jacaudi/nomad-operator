@@ -558,6 +558,41 @@ var _ = Describe("NomadJob reconciler: jobsForCluster mapper", func() {
 	})
 })
 
+var _ = Describe("decodeJob namespace injection", func() {
+	It("injects spec.nomadNamespace into job.Namespace", func() {
+		spec := nomadv1alpha1.NomadJobSpec{
+			JobID:          "web",
+			NomadNamespace: "team-a",
+			Job:            runtime.RawExtension{Raw: []byte(`{"type":"service"}`)},
+		}
+		job, err := decodeJob(spec, "global")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(job.Namespace).NotTo(BeNil())
+		Expect(*job.Namespace).To(Equal("team-a"))
+	})
+
+	It("rejects a blob namespace that disagrees with spec.nomadNamespace", func() {
+		spec := nomadv1alpha1.NomadJobSpec{
+			JobID:          "web",
+			NomadNamespace: "team-a",
+			Job:            runtime.RawExtension{Raw: []byte(`{"namespace":"team-b"}`)},
+		}
+		_, err := decodeJob(spec, "global")
+		Expect(err).To(MatchError(errNamespaceMismatch))
+	})
+
+	It("accepts a blob namespace equal to spec.nomadNamespace", func() {
+		spec := nomadv1alpha1.NomadJobSpec{
+			JobID:          "web",
+			NomadNamespace: "team-a",
+			Job:            runtime.RawExtension{Raw: []byte(`{"namespace":"team-a"}`)},
+		}
+		job, err := decodeJob(spec, "global")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(*job.Namespace).To(Equal("team-a"))
+	})
+})
+
 // assertGoneJob asserts the job CR no longer exists: the finalizer was removed
 // and Kubernetes garbage-collected the object (mirrors assertGonePool).
 func assertGoneJob(ctx SpecContext, ns, name string) {
