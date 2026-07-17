@@ -133,3 +133,33 @@ var _ = Describe("NomadNamespace reconciler: apply", func() {
 		Expect(f.registered).To(BeEmpty(), "no Register when nothing drifted")
 	})
 })
+
+var _ = Describe("NomadNamespace reconciler: conflict", func() {
+	It("sets NamespaceNameConflict and skips Register when a live sibling shares the name", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-conflict-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		first := &nomadv1alpha1.NomadNamespace{
+			ObjectMeta: metav1.ObjectMeta{Name: "team-a-1", Namespace: ns.Name},
+			Spec:       nomadv1alpha1.NomadNamespaceSpec{ClusterRef: nomadv1alpha1.NamespaceClusterRef{Name: nc.Name}, NamespaceName: "team-a"},
+		}
+		Expect(k8s.Create(ctx, first)).To(Succeed())
+		second := &nomadv1alpha1.NomadNamespace{
+			ObjectMeta: metav1.ObjectMeta{Name: "team-a-2", Namespace: ns.Name},
+			Spec:       nomadv1alpha1.NomadNamespaceSpec{ClusterRef: nomadv1alpha1.NamespaceClusterRef{Name: nc.Name}, NamespaceName: "team-a"},
+		}
+		Expect(k8s.Create(ctx, second)).To(Succeed())
+
+		f := newFakeNamespaceOps()
+		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "team-a-2", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got nomadv1alpha1.NomadNamespace
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "team-a-2", Namespace: ns.Name}, &got)).To(Succeed())
+		cond := meta.FindStatusCondition(got.Status.Conditions, nomadv1alpha1.NomadNamespaceCondReady)
+		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonNamespaceNameConflict))
+		Expect(f.registered).To(BeEmpty())
+	})
+})

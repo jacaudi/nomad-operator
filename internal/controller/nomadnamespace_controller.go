@@ -132,6 +132,20 @@ func (r *NomadNamespaceReconciler) reconcileNamespace(ctx context.Context, nn *n
 		return ctrl.Result{}, r.Status().Update(ctx, nn)
 	}
 
+	conflict, err := r.hasNamespaceNameConflict(ctx, nn)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if conflict {
+		setNamespaceCondition(nn, nomadv1alpha1.NomadNamespaceCondReady, metav1.ConditionFalse, nomadv1alpha1.ReasonNamespaceNameConflict, "another NomadNamespace targets this namespaceName on this cluster; skipping Register")
+		r.Recorder.Event(nn, "Warning", nomadv1alpha1.ReasonNamespaceNameConflict, "duplicate namespaceName on the same cluster; not registering to avoid churn")
+		nn.Status.ObservedGeneration = nn.Generation
+		if err := r.Status().Update(ctx, nn); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: namespaceResync}, nil
+	}
+
 	existing, err := ops.GetNamespace(ctx, nn.Spec.NamespaceName)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -216,6 +230,29 @@ func (r *NomadNamespaceReconciler) namespacesForCluster(ctx context.Context, obj
 		}
 	}
 	return reqs
+}
+
+// namespaceClusterKey is the composite collision key for a namespace CR.
+func namespaceClusterKey(nn *nomadv1alpha1.NomadNamespace) string {
+	return nn.Spec.ClusterRef.Name + "/" + nn.Spec.NamespaceName
+}
+
+// hasNamespaceNameConflict reports whether another live NomadNamespace in this
+// K8s namespace targets the same namespaceName on the same cluster. A Terminating
+// sibling does not count (it is being replaced/GC'd and must not block a
+// successor). Plain namespaced List + in-Go filter — no field indexer.
+func (r *NomadNamespaceReconciler) hasNamespaceNameConflict(ctx context.Context, nn *nomadv1alpha1.NomadNamespace) (bool, error) {
+	var list nomadv1alpha1.NomadNamespaceList
+	if err := r.List(ctx, &list, client.InNamespace(nn.Namespace)); err != nil {
+		return false, err
+	}
+	key := namespaceClusterKey(nn)
+	for i := range list.Items {
+		if list.Items[i].Name != nn.Name && list.Items[i].DeletionTimestamp.IsZero() && namespaceClusterKey(&list.Items[i]) == key {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // setNamespaceCondition upserts a status condition, preserving LastTransitionTime
