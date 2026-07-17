@@ -302,8 +302,9 @@ func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // it does not block the ensuing StatefulSet roll (if the external address truly
 // changed, the old one is dead regardless). The Condition is momentary (True on
 // the reconcile that observes the change, else Stable); the emitted Event is the
-// durable record. The Warning is gated on Ready (design M-3): a drift during the
-// first post-bootstrap roll still sets the Condition but at Normal severity.
+// durable record. The servers:1 Warning is gated on Ready (design M-3): a drift
+// observed during the first post-bootstrap roll (Phase != Ready) still sets the
+// Condition True but emits no Event. The HA path always emits a Normal Event.
 func (r *NomadClusterReconciler) checkAddressDrift(nc *nomadv1alpha1.NomadCluster, prev, cur string) {
 	if prev == "" || prev == cur {
 		setCondition(nc, nomadv1alpha1.CondRaftAddressDrift, metav1ConditionFalse, "Stable", "external advertise address stable")
