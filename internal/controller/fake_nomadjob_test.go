@@ -22,13 +22,16 @@ type fakeNomadJobOps struct {
 	deregistered   []string   // every DeregisterJob jobID, in order
 	deregisteredNS []string   // the namespace for each DeregisterJob, in order
 	purged         []bool     // the purge flag for each DeregisterJob, in order
+	getNS          []string   // the namespace for each GetJob, in order
+	summaryNS      []string   // the namespace for each JobGroupSummary, in order
 }
 
 func newFakeJobOps() *fakeNomadJobOps {
 	return &fakeNomadJobOps{jobs: map[string]*api.Job{}, summary: map[string]api.TaskGroupSummary{}}
 }
 
-func (f *fakeNomadJobOps) GetJob(_ context.Context, _ /*namespace*/ string, jobID string) (*api.Job, error) {
+func (f *fakeNomadJobOps) GetJob(_ context.Context, namespace, jobID string) (*api.Job, error) {
+	f.getNS = append(f.getNS, namespace)
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
@@ -65,7 +68,8 @@ func (f *fakeNomadJobOps) DeregisterJob(_ context.Context, namespace, jobID stri
 	return nil
 }
 
-func (f *fakeNomadJobOps) JobGroupSummary(_ context.Context, _ /*namespace*/ string, _ string) (map[string]api.TaskGroupSummary, error) {
+func (f *fakeNomadJobOps) JobGroupSummary(_ context.Context, namespace, _ string) (map[string]api.TaskGroupSummary, error) {
+	f.summaryNS = append(f.summaryNS, namespace)
 	if f.summaryErr != nil {
 		return nil, f.summaryErr
 	}

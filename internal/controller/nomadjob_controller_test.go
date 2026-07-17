@@ -329,6 +329,38 @@ var _ = Describe("NomadJob reconciler: status", func() {
 		Expect(got.Status.JobVersion).To(Equal(int64(4)))
 		Expect(got.Status.Groups["app"]).To(Equal(nomadv1alpha1.NomadJobGroupStatus{Running: 2, Desired: 3}))
 	})
+
+	It("reads job status in spec.nomadNamespace, not default", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-status-ns-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		// planChanged=false so no Register clobbers the seed (see the sibling
+		// status spec); the steady-state read path (GetJob + JobGroupSummary)
+		// must be reached with the job's non-default namespace threaded through.
+		f := newFakeJobOps()
+		f.planChanged = false
+		f.jobs["web"] = &api.Job{}
+		f.summary["app"] = api.TaskGroupSummary{Running: 1}
+
+		nj := &nomadv1alpha1.NomadJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadJobSpec{
+				ClusterRef:     nomadv1alpha1.JobClusterRef{Name: nc.Name},
+				JobID:          "web",
+				NomadNamespace: "team-a",
+				Job:            runtime.RawExtension{Raw: []byte(`{"type":"service","taskGroups":[{"name":"app","count":1}]}`)},
+			},
+		}
+		Expect(k8s.Create(ctx, nj)).To(Succeed())
+
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(f.getNS).To(ContainElement("team-a"), "GetJob must read in the job's namespace, not default")
+		Expect(f.summaryNS).To(ContainElement("team-a"), "JobGroupSummary must read in the job's namespace, not default")
+	})
 })
 
 var _ = Describe("NomadJob reconciler: finalize", func() {
