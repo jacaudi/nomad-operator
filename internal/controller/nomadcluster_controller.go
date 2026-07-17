@@ -29,6 +29,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
@@ -208,12 +209,17 @@ func (r *NomadClusterReconciler) bootstrapAndReady(ctx context.Context, nc *noma
 		return r.finish(ctx, nc, ctrl.Result{RequeueAfter: requeueShort})
 	}
 	setCondition(nc, nomadv1alpha1.CondQuorumHealthy, metav1ConditionTrue, "LeaderElected", "quorum healthy")
-	// status.leader carries the raw "ip:port" from Status().Leader(). Mapping it
-	// to a friendly "<name>-server-N.<region>" and populating status.members from
-	// Status().Peers() are DEFERRED to slice 6 (hardening) — noted so they are not
-	// silently dropped; the DoD only requires leader/quorum be populated.
+	// status.leader carries the raw "ip:port" from Status().Leader().
 	nc.Status.Leader = leader
-	nc.Status.Quorum = fmt.Sprintf("%d/%d", nc.Spec.Servers, nc.Spec.Servers)
+	// Real quorum + members from autopilot health. Placed after the leader
+	// gate; a read error must not flip Ready->Degraded (Degraded is entered
+	// only on leader-loss above), so on error we log and keep prior status.
+	if members, err := ops.ServerHealth(ctx); err != nil {
+		log.FromContext(ctx).Error(err, "reading server health for status.members; keeping prior status")
+	} else if len(members) > 0 {
+		nc.Status.Members = toMemberStatus(members)
+		nc.Status.Quorum = quorumString(members)
+	}
 
 	if err := r.ensureBootstrapToken(ctx, nc, ops); err != nil {
 		setCondition(nc, nomadv1alpha1.CondACLBootstrapped, metav1ConditionFalse, "BootstrapFailed", err.Error())

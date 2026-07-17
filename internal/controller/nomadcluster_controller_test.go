@@ -15,6 +15,7 @@ import (
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
+	"github.com/jacaudi/nomad-operator/internal/nomad"
 )
 
 func minimalCluster(name, ns string) *nomadv1alpha1.NomadCluster {
@@ -342,6 +343,67 @@ var _ = Describe("Managed provisioning", func() {
 		// (the existing Secret-gated idempotency guarantee still holds).
 		reconcileOnce(r, "retry", ns)
 		Expect(fake.bootstrapCalls).To(Equal(2))
+	})
+
+	It("populates status.members and a real status.quorum from ServerHealth once Ready", func() {
+		ctx := context.Background()
+		ns := "mgd-members"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, "nomad-tls", ns)
+		nc := minimalCluster("members", ns)
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+
+		fake := &fakeNomad{
+			leader:        "10.0.0.5:14647",
+			serverHealthy: true,
+			members: []nomad.NomadMember{
+				{Name: "members-server-0", Addr: "10.0.0.5:14647", Status: "alive", Leader: true, Voter: true},
+				{Name: "members-server-1", Addr: "10.0.0.6:24647", Status: "alive", Leader: false, Voter: true},
+				{Name: "members-server-2", Addr: "10.0.0.7:34647", Status: "failed", Leader: false, Voter: false},
+			},
+		}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+
+		reconcileOnce(r, "members", ns)
+		var gw gwapiv1.Gateway
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: names(nc).Gateway, Namespace: ns}, &gw)).To(Succeed())
+		gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: "10.0.0.5"}}
+		Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
+		reconcileOnce(r, "members", ns)
+
+		var got nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "members", Namespace: ns}, &got)).To(Succeed())
+		Expect(got.Status.Phase).To(Equal(nomadv1alpha1.PhaseReady))
+		Expect(got.Status.Quorum).To(Equal("2/3")) // 2 voters of 3 members
+		Expect(got.Status.Members).To(HaveLen(3))
+		Expect(got.Status.Members[0]).To(Equal(nomadv1alpha1.MemberStatus{
+			Name: "members-server-0", Addr: "10.0.0.5:14647", Status: "alive", Leader: true, Voter: true,
+		}))
+		Expect(got.Status.Members[2].Status).To(Equal("failed"))
+		Expect(got.Status.Members[2].Voter).To(BeFalse())
+	})
+
+	It("does not flip Ready->Degraded when ServerHealth errors", func() {
+		ctx := context.Background()
+		ns := "mgd-members-err"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, "nomad-tls", ns)
+		nc := minimalCluster("memberr", ns)
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+
+		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true, memberErr: errors.New("transient: health read")}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+
+		reconcileOnce(r, "memberr", ns)
+		var gw gwapiv1.Gateway
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: names(nc).Gateway, Namespace: ns}, &gw)).To(Succeed())
+		gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: "10.0.0.5"}}
+		Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
+		reconcileOnce(r, "memberr", ns)
+
+		var got nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "memberr", Namespace: ns}, &got)).To(Succeed())
+		Expect(got.Status.Phase).To(Equal(nomadv1alpha1.PhaseReady)) // health-read error must NOT degrade
 	})
 })
 
