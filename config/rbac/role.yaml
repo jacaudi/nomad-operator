@@ -57,6 +57,7 @@ rules:
   resources:
   - nomadclusters
   - nomadjobs
+  - nomadnamespaces
   - nomadnodes
   - nomadpools
   verbs:
@@ -72,6 +73,7 @@ rules:
   resources:
   - nomadclusters/finalizers
   - nomadjobs/finalizers
+  - nomadnamespaces/finalizers
   - nomadpools/finalizers
   verbs:
   - update
@@ -80,6 +82,7 @@ rules:
   resources:
   - nomadclusters/status
   - nomadjobs/status
+  - nomadnamespaces/status
   - nomadnodes/status
   - nomadpools/status
   verbs:
