@@ -119,6 +119,42 @@ func (c *Client) ServerHealthy(ctx context.Context) (bool, error) {
 	return h.Server != nil && h.Server.Ok, nil
 }
 
+// NomadMember is the operator's projection of a Nomad server's autopilot health,
+// decoupled from *api.ServerHealth so no api type leaks past this package.
+type NomadMember struct {
+	Name   string // ServerHealth.Name (node name)
+	Addr   string // ServerHealth.Address (advertise.rpc, "ip:port")
+	Status string // ServerHealth.SerfStatus ("alive"/"failed"/"left")
+	Leader bool   // ServerHealth.Leader
+	Voter  bool   // ServerHealth.Voter
+}
+
+func toMembers(in []api.ServerHealth) []NomadMember {
+	out := make([]NomadMember, 0, len(in))
+	for _, s := range in {
+		out = append(out, NomadMember{
+			Name:   s.Name,
+			Addr:   s.Address,
+			Status: s.SerfStatus,
+			Leader: s.Leader,
+			Voter:  s.Voter,
+		})
+	}
+	return out
+}
+
+// ServerHealth returns the per-server autopilot health for the cluster's
+// servers (name, advertise.rpc address, serf status, leader, voter). It reads
+// Operator().AutopilotServerHealth (GET /v1/operator/autopilot/health), an
+// operator endpoint that is not namespace-scoped.
+func (c *Client) ServerHealth(ctx context.Context) ([]NomadMember, error) {
+	reply, _, err := c.api.Operator().AutopilotServerHealth(queryOpts(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("nomad: autopilot server health: %w", err)
+	}
+	return toMembers(reply.Servers), nil
+}
+
 // ACLBootstrap bootstraps the ACL system with an operator-supplied management
 // token (Nomad's BootstrapOpts form) and returns the resulting secret ID. Using
 // a supplied token makes bootstrap idempotent: the caller persists the token

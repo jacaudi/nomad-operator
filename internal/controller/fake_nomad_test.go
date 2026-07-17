@@ -19,6 +19,9 @@ type fakeNomad struct {
 	// steady state, that it did NOT) — bootstrapped alone can't distinguish
 	// "never called" from "called and failed".
 	bootstrapCalls int
+	// members/memberErr drive ServerHealth for status.members/quorum tests.
+	members   []nomad.NomadMember
+	memberErr error
 }
 
 func (f *fakeNomad) Ping(context.Context) error { return f.pingErr }
@@ -37,6 +40,9 @@ func (f *fakeNomad) ACLBootstrap(_ context.Context, token string) (string, error
 	f.bootstrapped = true
 	f.lastToken = token
 	return token, nil // BootstrapOpts echoes the supplied secret ID
+}
+func (f *fakeNomad) ServerHealth(context.Context) ([]nomad.NomadMember, error) {
+	return f.members, f.memberErr
 }
 
 func newFakeFactory(f *fakeNomad) NomadClientFactory {

@@ -49,6 +49,7 @@ type NomadOps interface {
 	Leader(ctx context.Context) (string, error)
 	ServerHealthy(ctx context.Context) (bool, error)
 	ACLBootstrap(ctx context.Context, bootstrapToken string) (string, error)
+	ServerHealth(ctx context.Context) ([]nomad.NomadMember, error)
 }
 
 // NomadClientFactory builds a NomadOps from an explicit per-cluster Config.

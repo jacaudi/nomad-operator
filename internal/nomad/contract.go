@@ -42,6 +42,8 @@ var (
 	_ api.TaskGroupSummary
 	_ api.Namespace
 	_ api.JobListStub
+	_ api.OperatorHealthReply
+	_ api.ServerHealth
 )
 
 // Method / constructor signature pins (method expressions; receiver never evaluated).
@@ -76,6 +78,8 @@ var (
 	_ = (*api.Jobs).Register
 	_ = (*api.Jobs).Deregister
 	_ = (*api.Jobs).Summary
+	_ = (*api.Client).Operator
+	_ = (*api.Operator).AutopilotServerHealth
 	_ = (*api.QueryOptions).WithContext
 	_ = (*api.WriteOptions).WithContext
 	_ = api.UnexpectedResponseError.StatusCode
