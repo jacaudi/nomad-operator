@@ -11,6 +11,12 @@ Source: slice-2 whole-branch review, 2026-07-11.
 
 ## 1. `status.quorum` is fabricated `N/N`, not measured
 
+- **Status: Resolved (2026-07-17, slice 6b).** `status.quorum` is now
+  `voters/total`, computed from a real `Operator().AutopilotServerHealth`
+  read; `status.members` is populated from the same read in
+  `bootstrapAndReady` (`internal/controller/nomadcluster_controller.go`,
+  `internal/controller/status_members.go`). See
+  `docs/designs/2026-07-17-nomadcluster-restart-resilience-design.md` §6.
 - **Severity:** Minor · **Area:** reconciler / status
 - **Location:** `internal/controller/nomadcluster_controller.go` (`bootstrapAndReady`, the
   `nc.Status.Quorum = fmt.Sprintf("%d/%d", servers, servers)` line, ~:219)
@@ -120,6 +126,33 @@ Source: slice-2 whole-branch review, 2026-07-11.
   upgrade, eviction) is a brief control-plane outage; running workloads on edge clients keep
   running, but new scheduling/API is unavailable until the server is back. Recommend `3`/`5`
   for production HA; `1` for edge/dev/single-node.
+
+### Correction: the "servers:1 does not survive a server-pod restart" observation
+
+A 2026-07-16 live-kind end-to-end run recorded that a `servers: 1` cluster
+"does not survive a server-pod restart," root-caused at the time as
+*"advertise uses the ephemeral `POD_IP`, which changes on restart and wedges
+raft."* Both the observation's root cause and its generality were wrong,
+and are corrected here (slice 6b,
+`docs/designs/2026-07-17-nomadcluster-restart-resilience-design.md` §1–§3):
+
+- The recorded failure was a **bare-kind harness artifact** — the e2e run
+  manually patched a non-durable fake LB ingress IP that changed across the
+  restart. A live Nomad v2.0.4 spike (design §2) proved the pod/container IP
+  is irrelevant to raft; only the advertised `rpc` address changing across a
+  restart wedges raft, and the operator already advertises a **stable**
+  address (the Gateway/LB object's address, not `POD_IP`).
+- With a real LB/Gateway the advertised address is stable across a restart,
+  so **`servers: 1` already survives a normal server-pod restart** in any
+  real deployment — the "does not survive restart" framing does not
+  generalize.
+- The genuine, narrow failure mode is `servers: 1` + **external-address
+  drift** (LB reassignment, Service delete/recreate, `loadBalancerClass`
+  change) — raft cannot remove its sole voter when the advertised address
+  changes out from under it. This is now covered by
+  `docs/runbooks/nomadcluster.md` §9 (recognition + recovery) and the
+  operator-side `RaftAddressDrift` Condition/Event guard
+  (`checkAddressDrift` in `internal/controller/nomadcluster_controller.go`).
 
 ## 7. Existing mode: operator does not watch the referenced Gateway
 

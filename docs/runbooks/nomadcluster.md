@@ -466,3 +466,120 @@ Both `spec.externalAccess.mode` and `spec.servers` are immutable (enforced by
 CEL). A cluster cannot switch modes in place, and because `servers` is fixed, a
 3- or 5-server cluster can **never** become `LoadBalancer` — the mode is
 decided once, at creation.
+
+## 9. Restart resilience & raft address stability
+
+A Nomad server's raft peer identity is `(node-id, advertise.rpc-address)`.
+`node-id` is persisted on the PVC (`/var/lib/nomad/server/node-id`) and is
+stable across restarts; `advertise.rpc` is the address the operator resolves
+from the Gateway/LoadBalancer object (§8) and renders into each server's
+config — **not** the pod's ephemeral `POD_IP`, which only backs `serf` and
+never enters the raft peer set. Because `gateway_address`/the LB ingress
+address live on a Service/Gateway object rather than a pod, that address is
+stable across a normal backend-pod restart. Raft integrity therefore depends
+on one thing: **`advertise.rpc` staying the same across a restart.** This was
+verified directly against a live Nomad v2.0.4 harness (design
+`docs/designs/2026-07-17-nomadcluster-restart-resilience-design.md` §2):
+
+| Config | Restart, **stable** `advertise.rpc` | Restart, **drifted** `advertise.rpc` |
+| --- | --- | --- |
+| **`servers: 1`** | self-heals | **permanent wedge** — raft cannot remove its sole voter, manual recovery required |
+| **`servers: 3`/`5`** | self-heals | self-heals — autopilot removes the drifted voter and re-adds/promotes it once it rejoins at the new address |
+
+**The invariant:** raft integrity depends on a stable external
+`advertise.rpc`; the operator supplies one from the Gateway/LB address, so a
+normal pod restart self-heals. A drifting external address wedges
+`servers: 1` because raft cannot remove its sole voter; HA self-heals via
+autopilot.
+
+### 9.1 Recognizing the wedge
+
+The operator ships an `advertise.rpc` drift guard (`checkAddressDrift` in
+`internal/controller/nomadcluster_controller.go`) that compares the
+freshly-resolved external address against the previously-persisted
+`status.externalAddress` on every reconcile, **before** it is overwritten.
+Its signal shape differs by topology and phase, so check the `Condition`
+directly rather than relying on event severity alone:
+
+- **The `RaftAddressDrift` Condition is the reliable signal — it is set
+  `True` on *any* drift, at any `spec.servers` count and any phase.** It is
+  momentary: `True` only on the reconcile that first observes the address
+  change, `False`/`Stable` afterward.
+- **`spec.servers: 1` + drift + `status.phase == Ready`** — a `Warning`
+  Event fires (`reason: RaftAddressDrift`) **and** the Condition is set
+  `True`. This is the durable record once the Condition reverts to
+  `Stable`.
+- **`spec.servers: 1` + drift observed while `status.phase != Ready`** (e.g.
+  a drift during the first post-bootstrap roll, while still
+  `Bootstrapping`) — the Condition is still set `True`, but **no Event is
+  emitted at all.** The Warning is suppressed and nothing is substituted in
+  its place — the Condition is the *only* record of this drift, and only
+  for the one reconcile that observed it.
+- **`spec.servers ≥ 3` (HA) + drift, any phase** — a `Normal` Event fires
+  (`reason: RaftAddressDrift`, "HA autopilot will self-heal") **and** the
+  Condition is set `True`, unconditionally on phase.
+
+```bash
+kubectl get nomadcluster <name> -n <ns> -o jsonpath='{.status.conditions}' | jq
+kubectl get events -n <ns> --field-selector involvedObject.name=<name>
+```
+
+Beyond the Condition/Event, confirm the wedge directly on the affected
+server:
+
+```bash
+kubectl logs -n <ns> <name>-server-0 | grep "need at least one voter in configuration"
+kubectl exec -n <ns> <name>-server-0 -- nomad operator raft list-peers
+# the stale address shows State: follower even though the process is leader
+```
+
+### 9.2 Recovery (`servers: 1` + drift wedge only)
+
+This procedure applies **only** to a single-node (`servers: 1`) cluster
+wedged by an external-address drift (§9.1). HA clusters self-heal via
+autopilot and need no manual recovery.
+
+**Path A — preserve state (raft `peers.json` recovery).** Fetch the node's
+persisted `node-id`, then write a `peers.json` naming that same node at its
+**new** advertised address; Nomad consumes and deletes the file on the next
+agent start:
+
+```bash
+kubectl exec -n <ns> <name>-server-0 -- cat /var/lib/nomad/server/node-id
+# e.g. 8b2a1e4c-...-f1a9
+
+kubectl exec -n <ns> <name>-server-0 -- sh -c 'cat > /var/lib/nomad/server/raft/peers.json <<EOF
+[
+  {
+    "id": "8b2a1e4c-...-f1a9",
+    "address": "<new-externalAddress>:<rpcPort>",
+    "non_voter": false
+  }
+]
+EOF'
+
+kubectl delete pod -n <ns> <name>-server-0
+```
+
+Verify after the pod restarts:
+
+```bash
+kubectl exec -n <ns> <name>-server-0 -- nomad operator raft list-peers
+# should show a single voter at the new address, State: leader
+```
+
+**Path B — simplest, dev-acceptable (loses Nomad state).** Delete the server
+pod's data PVC and let the StatefulSet re-bootstrap a clean single-node raft
+at the new address:
+
+```bash
+kubectl delete pod -n <ns> <name>-server-0
+kubectl delete pvc -n <ns> data-<name>-server-0
+# the StatefulSet recreates the pod; the fresh PVC bootstraps a new raft
+# at the current (post-drift) advertise.rpc
+```
+
+**Guidance:** prefer `spec.servers: 3` for any cluster where external-address
+drift is plausible (LB reassignment, Service delete/recreate, switching
+`loadBalancerClass`) — HA self-heals via autopilot and needs no manual
+recovery at all.
