@@ -49,6 +49,7 @@ const (
 	CondQuorumHealthy       = "QuorumHealthy"
 	CondACLBootstrapped     = "ACLBootstrapped"
 	CondReady               = "Ready"
+	CondRaftAddressDrift    = "RaftAddressDrift"
 )
 
 // StorageSpec configures the persistent volume claims for Nomad server data.

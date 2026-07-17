@@ -26,6 +26,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -66,6 +67,7 @@ type NomadClusterReconciler struct {
 	client.Client
 	Scheme         *runtime.Scheme
 	NewNomadClient NomadClientFactory
+	Recorder       record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=nomad.operator.io,resources=nomadclusters,verbs=get;list;watch;create;update;patch;delete
@@ -120,8 +122,10 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		setCondition(&nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionFalse, "WaitingForAddress", "external address not assigned")
 		return r.finish(ctx, &nc, ctrl.Result{RequeueAfter: requeueShort})
 	}
+	prevAddr := nc.Status.ExternalAddress
 	nc.Status.ExternalAddress = extAddr
 	setCondition(&nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionTrue, "Assigned", "external address assigned")
+	r.checkAddressDrift(&nc, prevAddr, extAddr)
 
 	// 3. Render config + provision workloads.
 	_, configHash := renderConfig(&nc, extAddr)
@@ -266,6 +270,9 @@ func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.NewNomadClient == nil {
 		r.NewNomadClient = DefaultNomadClientFactory
 	}
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorderFor("nomadcluster")
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nomadv1alpha1.NomadCluster{}).
 		// Own every secondary object apply() sets a controller ref on (§security.go
@@ -286,4 +293,34 @@ func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&gwapiv1.Gateway{}, handler.EnqueueRequestsFromMapFunc(r.gatewayToClusters)).
 		Named("nomadcluster").
 		Complete(r)
+}
+
+// checkAddressDrift surfaces a change in the resolved external advertise
+// address. Raft integrity depends on a stable advertise.rpc: at servers:1 a
+// drift wedges the single-node raft (it cannot remove its sole voter) and needs
+// manual recovery; HA self-heals via autopilot. This DETECTS and reports only —
+// it does not block the ensuing StatefulSet roll (if the external address truly
+// changed, the old one is dead regardless). The Condition is momentary (True on
+// the reconcile that observes the change, else Stable); the emitted Event is the
+// durable record. The Warning is gated on Ready (design M-3): a drift during the
+// first post-bootstrap roll still sets the Condition but at Normal severity.
+func (r *NomadClusterReconciler) checkAddressDrift(nc *nomadv1alpha1.NomadCluster, prev, cur string) {
+	if prev == "" || prev == cur {
+		setCondition(nc, nomadv1alpha1.CondRaftAddressDrift, metav1ConditionFalse, "Stable", "external advertise address stable")
+		return
+	}
+	msg := fmt.Sprintf("external advertise address changed %s -> %s", prev, cur)
+	if nc.Spec.Servers == 1 {
+		setCondition(nc, nomadv1alpha1.CondRaftAddressDrift, metav1ConditionTrue, "AddressChanged",
+			msg+"; single-node raft will wedge on the ensuing roll - see the restart-resilience recovery runbook")
+		if nc.Status.Phase == nomadv1alpha1.PhaseReady && r.Recorder != nil {
+			r.Recorder.Event(nc, "Warning", nomadv1alpha1.CondRaftAddressDrift, msg+"; servers:1 raft will wedge - see recovery runbook")
+		}
+		return
+	}
+	setCondition(nc, nomadv1alpha1.CondRaftAddressDrift, metav1ConditionTrue, "AddressChangedHA",
+		msg+"; HA autopilot will self-heal")
+	if r.Recorder != nil {
+		r.Recorder.Event(nc, "Normal", nomadv1alpha1.CondRaftAddressDrift, msg+"; HA autopilot will self-heal")
+	}
 }

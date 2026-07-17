@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
@@ -404,6 +405,77 @@ var _ = Describe("Managed provisioning", func() {
 		var got nomadv1alpha1.NomadCluster
 		Expect(k8s.Get(ctx, types.NamespacedName{Name: "memberr", Namespace: ns}, &got)).To(Succeed())
 		Expect(got.Status.Phase).To(Equal(nomadv1alpha1.PhaseReady)) // health-read error must NOT degrade
+	})
+})
+
+var _ = Describe("advertise.rpc drift guard", func() {
+	// driveToReady runs the two-reconcile Managed path to Ready at address A,
+	// returning the reconciler (with a fake recorder) for a follow-up drift.
+	driveToReady := func(ctx context.Context, name, ns, addrA string, servers int32, rpcPorts []int32) (*NomadClusterReconciler, *record.FakeRecorder) {
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, "nomad-tls", ns)
+		nc := minimalCluster(name, ns)
+		nc.Spec.Servers = servers
+		nc.Spec.ExternalAccess.Gateway.RPCPorts = rpcPorts
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+
+		rec := record.NewFakeRecorder(10)
+		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake), Recorder: rec}
+
+		reconcileOnce(r, name, ns)
+		var gw gwapiv1.Gateway
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: names(nc).Gateway, Namespace: ns}, &gw)).To(Succeed())
+		gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: addrA}}
+		Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
+		reconcileOnce(r, name, ns)
+
+		var got nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+		Expect(got.Status.Phase).To(Equal(nomadv1alpha1.PhaseReady))
+		return r, rec
+	}
+
+	driftTo := func(ctx context.Context, name, ns, addrB string, r *NomadClusterReconciler) nomadv1alpha1.NomadCluster {
+		var gw gwapiv1.Gateway
+		// names(nc).Gateway == nc.Name + "-gateway" (internal/controller/names.go:37).
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: name + "-gateway", Namespace: ns}, &gw)).To(Succeed())
+		gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: addrB}}
+		Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
+		reconcileOnce(r, name, ns)
+		var got nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+		return got
+	}
+
+	It("does not fire on a stable address (no drift)", func() {
+		ctx := context.Background()
+		r, rec := driveToReady(ctx, "stable", "drift-stable", "10.0.0.5", 3, []int32{14647, 24647, 34647})
+		got := driftTo(ctx, "stable", "drift-stable", "10.0.0.5", r) // same address
+		Expect(meta_IsStatusConditionFalse(got.Status.Conditions, nomadv1alpha1.CondRaftAddressDrift)).To(BeTrue())
+		Consistently(rec.Events).ShouldNot(Receive())
+	})
+
+	It("raises a Warning + True condition on servers:1 drift while Ready", func() {
+		ctx := context.Background()
+		r, rec := driveToReady(ctx, "single", "drift-single", "10.0.0.5", 1, []int32{14647})
+		got := driftTo(ctx, "single", "drift-single", "10.0.0.9", r)
+		Expect(meta_IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.CondRaftAddressDrift)).To(BeTrue())
+		var ev string
+		Eventually(rec.Events).Should(Receive(&ev))
+		Expect(ev).To(ContainSubstring("Warning"))
+		Expect(ev).To(ContainSubstring("wedge"))
+	})
+
+	It("raises a Normal (self-heal) event + True condition on HA drift", func() {
+		ctx := context.Background()
+		r, rec := driveToReady(ctx, "hadrift", "drift-ha", "10.0.0.5", 3, []int32{14647, 24647, 34647})
+		got := driftTo(ctx, "hadrift", "drift-ha", "10.0.0.9", r)
+		Expect(meta_IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.CondRaftAddressDrift)).To(BeTrue())
+		var ev string
+		Eventually(rec.Events).Should(Receive(&ev))
+		Expect(ev).To(ContainSubstring("Normal"))
+		Expect(ev).To(ContainSubstring("self-heal"))
 	})
 })
 
