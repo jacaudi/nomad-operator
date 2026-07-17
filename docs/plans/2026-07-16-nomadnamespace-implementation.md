@@ -22,6 +22,8 @@
 >
 > Skills carry their own model and effort settings. Do not override them.
 
+> **Amended 2026-07-17** after an independent sr-go-engineer *plan* review (Fable model), verdict *amend-before-execution* — mechanical/localized fixes, no architectural change. Folded: **C1** — `Namespaces().Register` PUTs to the fixed `/v1/namespace` path with the name in the JSON body (not `/v1/namespace/<name>`), so the T1 `UpsertNamespace` test asserts the path `/v1/namespace` + body `Name` (was a TDD-deadlocking wrong assertion). **I1/M2** — T10 must also update `internal/nomad/job_integration_test.go` (behind `//go:build integration`, invisible to untagged `make test`) and the real client call at `internal/nomad/../nomadjob_controller_test.go` (`DeregisterJob(ctx, "web", true)`), and name all four `job_test.go` call sites; T10's gate adds `go vet -tags integration ./...`. **I2** — the T11 live spike reuses the real harness helper `devAgentWithNode(t)` (`internal/nomad/client_write_integration_test.go`), not a nonexistent `startDevAgentClient`. **M1** — T7 builds the not-empty error via the existing httptest-4xx→`nomad.New` pattern (as in `nomadjob_controller_test.go`), NOT a new production `nomad.*ForTest()` seam. The reviewer confirmed SOUND: `k8s`/`readyCluster` helpers, reused reason constants, API routes/fields (`Namespace.Quota`, `Jobs().List` namespace scoping), all `contract.go` pins, NomadPool mirror fidelity, and that no task except this integration-build gap leaves a red build.
+
 ## Global Constraints
 
 - **Go standard-library-only for the nomad boundary** where the pinned `api` already covers it; never `api.DefaultConfig` (absorbs `NOMAD_*` env). New client methods take `context.Context` first and wrap errors with `fmt.Errorf("nomad: <op> %q: %w", ...)`.
@@ -85,6 +87,7 @@
 package nomad
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -113,16 +116,21 @@ func TestGetNamespace_Found(t *testing.T) {
 }
 
 func TestUpsertNamespace_PostsName(t *testing.T) {
-	var gotPath string
+	var gotPath, gotName string
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		var ns api.Namespace
+		_ = json.NewDecoder(r.Body).Decode(&ns)
+		gotName = ns.Name
 		w.WriteHeader(http.StatusOK)
 	})
 	if err := c.UpsertNamespace(t.Context(), &api.Namespace{Name: "team-a"}); err != nil {
 		t.Fatalf("UpsertNamespace: %v", err)
 	}
-	if gotPath != "/v1/namespace/team-a" {
-		t.Fatalf("path = %q, want /v1/namespace/team-a", gotPath)
+	// Register PUTs to the FIXED /v1/namespace path with the name in the JSON
+	// body (not /v1/namespace/<name>).
+	if gotPath != "/v1/namespace" || gotName != "team-a" {
+		t.Fatalf("Register = path %q name %q, want /v1/namespace + team-a", gotPath, gotName)
 	}
 }
 
@@ -1191,10 +1199,8 @@ var _ = Describe("NomadNamespace reconciler: finalize", func() {
 		nn := newNS(ctx, ns.Name, nc.Name, true)
 
 		f := newFakeNamespaceOps()
-		f.deleteErr = &api.UnexpectedResponseError{} // shaped below via a helper if needed
 		f.jobCount = 2
-		// Force the not-empty classification: use a real UnexpectedResponseError body.
-		f.deleteErr = newNotEmptyErr()
+		f.deleteErr = notEmptyErr() // a genuine "not empty" api.UnexpectedResponseError the classifier matches
 		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nn.Name, Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
@@ -1223,24 +1229,25 @@ var _ = Describe("NomadNamespace reconciler: finalize", func() {
 })
 ```
 
-Add this helper near the top of the test file (produces a real not-empty error the classifier matches):
+Add this helper near the top of the test file — it produces a **real** `api.UnexpectedResponseError` the classifier matches, using the same httptest→`nomad.New` round-trip the job controller tests already use (SGE plan-review M1; do NOT add a production `nomad.*ForTest()` seam). Add the imports `"context"`, `"net/http"`, `"net/http/httptest"`, and `"github.com/jacaudi/nomad-operator/internal/nomad"` to the test file.
 
 ```go
-// newNotEmptyErr builds an error whose IsNamespaceNotEmpty(...) is true, by
-// round-tripping a 400 through a throwaway client — mirrors how the pool tests
-// obtain a real UnexpectedResponseError. If the suite already has an equivalent
-// helper, reuse it instead.
-func newNotEmptyErr() error {
-	// Implemented via a small httptest server returning 400 "has non-terminal
-	// jobs"; see internal/nomad/errors_test.go for the shape. In the controller
-	// package, prefer constructing api.UnexpectedResponseError through the nomad
-	// package's exported test seam if one exists; otherwise use a wrapped error
-	// that nomad.IsNamespaceNotEmpty recognizes.
-	return nomad.NotEmptyNamespaceErrForTest()
+// notEmptyErr returns a genuine "namespace has non-terminal jobs" error by
+// round-tripping a 400 through a throwaway nomad client — the proven pattern the
+// job controller tests use to obtain a real api.UnexpectedResponseError. No
+// production test-seam is added.
+func notEmptyErr() error {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `namespace "team-a" has non-terminal jobs`, http.StatusBadRequest)
+	}))
+	DeferCleanup(srv.Close)
+	c, err := nomad.New(nomad.Config{Address: srv.URL})
+	Expect(err).NotTo(HaveOccurred())
+	return c.DeleteNamespace(context.Background(), "team-a")
 }
 ```
 
-> **Implementer note:** the controller package cannot construct `api.UnexpectedResponseError` with a body directly (its fields are unexported paths). Add a tiny exported test seam in `internal/nomad` — `func NotEmptyNamespaceErrForTest() error` in a NON-`_test.go` file guarded by intent, OR (preferred) expose it via a `//go:build` test helper. The cleanest option consistent with the codebase: in `internal/nomad/errors.go` there is already the `api.UnexpectedResponseError` shape exercised through `newTestClient`; replicate that round-trip inside the controller test using a local `httptest` server and `nomad.New`, then call `c.DeleteNamespace` to get a real error. If that is heavy, fall back to asserting the not-empty branch in an `internal/nomad` test (Task 1 already covers `IsNamespaceNotEmpty`) and assert only the `DeleteFailed`-vs-blocked control flow here with a plain `errors.New`.
+> **Implementer note:** this mirrors `internal/controller/nomadjob_controller_test.go` (the existing httptest-4xx→`nomad.New` pattern for a real `api.UnexpectedResponseError`). `DeferCleanup` is Ginkgo's; it runs after the spec. If wiring a real error proves heavy in review, the acceptable fallback is to assert the not-empty *classification* in the `internal/nomad` suite (Task 1's `TestIsNamespaceNotEmpty` already does) and here assert only the `DeleteFailed`-vs-blocked control flow with a plain `errors.New` — but prefer the real error above so the `NamespaceNotEmpty` reason is exercised end-to-end.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -1521,7 +1528,8 @@ git commit -m "feat(nomadjob): spec.nomadNamespace field + decode injection + Na
 - Modify: `internal/controller/nomadjob_ops.go` (interface signature)
 - Modify: `internal/controller/fake_nomadjob_test.go` (fake signature + recording)
 - Modify: `internal/controller/nomadjob_controller.go` (caller namespace args)
-- Modify: `internal/controller/nomadjob_controller_test.go` (orphan-regression envtest; fix any callers of the changed fake)
+- Modify: `internal/controller/nomadjob_controller_test.go` (orphan-regression envtest; fix the real client call at the `nomadClient.DeregisterJob(ctx, "web", true)` site)
+- Modify: `internal/nomad/job_integration_test.go` (behind `//go:build integration` — its `GetJob`/`DeregisterJob`/`JobGroupSummary` calls break too, and untagged `make test` will NOT catch them — SGE I1)
 
 **Interfaces:**
 - Produces: `GetJob(ctx, namespace, jobID)`, `DeregisterJob(ctx, namespace, jobID, purge)`, `JobGroupSummary(ctx, namespace, jobID)`; `PlanJob`/`RegisterJob` set `WriteOptions.Namespace` from `job.Namespace` (nil-guarded). `NomadJobOps` reflects the three new signatures.
@@ -1576,7 +1584,7 @@ func TestRegisterJob_ScopesByJobNamespace(t *testing.T) {
 }
 ```
 
-Also update the existing `TestPlanJob_*` / `TestGetJob_NotFound` calls that now need a namespace argument — e.g. `c.GetJob(t.Context(), "default", "missing")`.
+Also update **all four** existing `internal/nomad/job_test.go` call sites that now need a namespace argument (SGE M2): `TestGetJob_NotFound` (`c.GetJob(t.Context(), "default", "missing")`), the `TestPlanJob_*` cases (signature unchanged — `PlanJob` still takes just the job — but confirm they compile), `TestJobGroupSummary` (`c.JobGroupSummary(t.Context(), "default", ...)`), and `TestDeregisterJob_OK` (`c.DeregisterJob(t.Context(), "default", ...)`).
 
 - [ ] **Step 2: Run to verify it fails / does not compile**
 
@@ -1738,15 +1746,19 @@ var _ = Describe("NomadJob finalizer namespace threading", func() {
 })
 ```
 
-- [ ] **Step 8: Fix any other callers the signature change broke.** Search and update:
+- [ ] **Step 8: Fix every other caller the signature change broke — including `_test.go` and integration-tagged files** (SGE I1). Search WITH test files:
 
-Run: `grep -rn "GetJob(\|DeregisterJob(\|JobGroupSummary(" internal/ | grep -v _test.go`
-Then build the tests: `go vet ./... 2>&1 | head`. Update any remaining call sites (there should be only the three in `nomadjob_controller.go`, already done) and any existing test assertions that constructed the old fake calls.
+Run: `grep -rn "GetJob(\|DeregisterJob(\|JobGroupSummary(" internal/`
+Expected break sites to update: `nomadjob_controller.go` (the three, done in Step 6); `nomadjob_controller_test.go` (the real `nomadClient.DeregisterJob(ctx, "web", true)` call — add the namespace arg); `job_test.go` (the four from Step 1); `job_integration_test.go` (its `GetJob`/`DeregisterJob`/`JobGroupSummary` calls, behind `//go:build integration`).
+Then vet BOTH build configurations (untagged `make test` does NOT compile the integration files):
 
-- [ ] **Step 9: Run the full gate**
+Run: `go vet ./... && go vet -tags integration ./...`
+Expected: both clean — no "not enough arguments" / signature errors.
 
-Run: `make test`
-Expected: PASS (nomad unit tests + both controller suites green).
+- [ ] **Step 9: Run the full gate (both build configs)**
+
+Run: `go build -tags integration ./internal/nomad/... && make test`
+Expected: integration files compile; PASS (nomad unit tests + both controller suites green).
 
 - [ ] **Step 10: Commit**
 
@@ -1806,7 +1818,7 @@ import (
 // IsNamespaceNotEmpty matches the exact v2.0.4 wording — closes design §6.1),
 // then deregister the job and delete the namespace. Skips if no nomad binary.
 func TestNamespaceLifecycleLive(t *testing.T) {
-	c := startDevAgentClient(t) // same helper the other *Live tests use
+	c, _ := devAgentWithNode(t) // the real live-agent bootstrap TestJobLifecycleLive reuses (client_write_integration_test.go); do NOT invent a new harness
 	const nsName = "it-team-a"
 
 	if err := c.UpsertNamespace(t.Context(), &api.Namespace{Name: nsName, Description: "it"}); err != nil {
@@ -1845,7 +1857,7 @@ func TestNamespaceLifecycleLive(t *testing.T) {
 }
 ```
 
-> **Implementer note:** reuse whatever dev-agent bootstrap and job-body builder `internal/nomad/job_integration_test.go` (`TestJobLifecycleLive`) already provides — do not reinvent the harness. The job MUST have ≥1 task group + task (Nomad rejects `"Missing job task groups"`), using the `raw_exec` driver that is healthy under `nomad agent -dev`.
+> **Implementer note:** reuse the existing dev-agent bootstrap `devAgentWithNode(t) (*Client, string)` (`internal/nomad/client_write_integration_test.go`) and the job-body builder `TestJobLifecycleLive` (`internal/nomad/job_integration_test.go`) already uses — do NOT reinvent the harness (Global Constraints). The job MUST have ≥1 task group + task (Nomad rejects `"Missing job task groups"`), using the `raw_exec` driver that is healthy under `nomad agent -dev`; set `job.Namespace = &nsName` so it lands in the namespace.
 
 - [ ] **Step 5: Add the test to the Makefile filter** (`Makefile`, line ~279). Append `|TestNamespaceLifecycleLive` to the `-run` regex:
 
