@@ -84,3 +84,16 @@ func TestIsACLAlreadyBootstrapped_NilAndUnrelatedErrors(t *testing.T) {
 		t.Fatal("IsACLAlreadyBootstrapped(unrelated error) = true, want false")
 	}
 }
+
+func TestIsNamespaceNotEmpty(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "namespace \"team-a\" has non-terminal jobs", http.StatusBadRequest)
+	})
+	err := c.DeleteNamespace(t.Context(), "team-a")
+	if err == nil || !IsNamespaceNotEmpty(err) {
+		t.Fatalf("IsNamespaceNotEmpty(%v) = false, want true", err)
+	}
+	if IsNamespaceNotEmpty(nil) {
+		t.Fatal("IsNamespaceNotEmpty(nil) = true, want false")
+	}
+}

@@ -40,6 +40,8 @@ var (
 	_ api.JobRegisterResponse
 	_ api.JobSummary
 	_ api.TaskGroupSummary
+	_ api.Namespace
+	_ api.JobListStub
 )
 
 // Method / constructor signature pins (method expressions; receiver never evaluated).
@@ -63,6 +65,11 @@ var (
 	_ = (*api.NodePools).Delete
 	_ = (*api.NodePools).ListNodes
 	_ = (*api.NodePools).ListJobs
+	_ = (*api.Client).Namespaces
+	_ = (*api.Namespaces).Info
+	_ = (*api.Namespaces).Register
+	_ = (*api.Namespaces).Delete
+	_ = (*api.Jobs).List
 	_ = (*api.Client).Jobs
 	_ = (*api.Jobs).Info
 	_ = (*api.Jobs).Plan
