@@ -66,10 +66,11 @@ func IsNodePoolNotEmpty(err error) bool {
 
 // namespaceNotEmptyTexts are the substrings Nomad's server embeds in the error
 // body when a namespace cannot be deleted because it still has non-terminal
-// jobs. The exact v2.0.4 wording is confirmed by the T11 integration spike;
-// keep this list in sync with that finding. Used only to choose a friendlier
-// DeleteBlocked reason — control flow keeps the finalizer on ANY Delete error.
-var namespaceNotEmptyTexts = []string{"has non-terminal jobs", "has non-terminal"}
+// jobs. Confirmed live against Nomad v2.0.4 (2026-07-17): the refusal body is
+// `namespace "<name>" has non-terminal jobs in regions: [global]`. Used only to
+// choose a friendlier DeleteBlocked reason — control flow keeps the finalizer on
+// ANY Delete error.
+var namespaceNotEmptyTexts = []string{"has non-terminal jobs"}
 
 // IsNamespaceNotEmpty reports whether err is Nomad's refusal to delete a
 // namespace that still has non-terminal jobs.
