@@ -200,7 +200,7 @@ func (r *NomadJobReconciler) reconcileJob(ctx context.Context, nj *nomadv1alpha1
 	}
 
 	// Derive bounded runtime status (managed, not a deep mirror).
-	info, err := ops.GetJob(ctx, nj.Spec.JobID)
+	info, err := ops.GetJob(ctx, nj.Spec.NomadNamespace, nj.Spec.JobID)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -212,7 +212,7 @@ func (r *NomadJobReconciler) reconcileJob(ctx context.Context, nj *nomadv1alpha1
 			nj.Status.JobVersion = int64(*info.Version)
 		}
 	}
-	summary, err := ops.JobGroupSummary(ctx, nj.Spec.JobID)
+	summary, err := ops.JobGroupSummary(ctx, nj.Spec.NomadNamespace, nj.Spec.JobID)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -282,7 +282,7 @@ func (r *NomadJobReconciler) finalizeJob(ctx context.Context, nj *nomadv1alpha1.
 
 	// purge=true: the CR going away means the job should not exist; a lingering
 	// dead record would collide with a future re-create of the same jobID.
-	if derr := ops.DeregisterJob(ctx, nj.Spec.JobID, true); derr != nil && !nomad.IsNotFound(derr) {
+	if derr := ops.DeregisterJob(ctx, nj.Spec.NomadNamespace, nj.Spec.JobID, true); derr != nil && !nomad.IsNotFound(derr) {
 		setJobCondition(nj, nomadv1alpha1.NomadJobCondDeleteBlocked, metav1.ConditionTrue, nomadv1alpha1.ReasonDeregisterFailed, derr.Error())
 		if uerr := r.Status().Update(ctx, nj); uerr != nil {
 			return ctrl.Result{}, uerr

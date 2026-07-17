@@ -496,7 +496,7 @@ var _ = Describe("NomadJob reconciler: finalize", func() {
 		DeferCleanup(srv.Close)
 		nomadClient, err := nomad.New(nomad.Config{Address: srv.URL})
 		Expect(err).NotTo(HaveOccurred())
-		notFound := nomadClient.DeregisterJob(ctx, "web", true)
+		notFound := nomadClient.DeregisterJob(ctx, "default", "web", true)
 		Expect(nomad.IsNotFound(notFound)).To(BeTrue(), "sanity: the seeded error must be a real, non-nil 404 that satisfies nomad.IsNotFound")
 
 		f := newFakeJobOps()
@@ -590,6 +590,35 @@ var _ = Describe("decodeJob namespace injection", func() {
 		job, err := decodeJob(spec, "global")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(*job.Namespace).To(Equal("team-a"))
+	})
+})
+
+var _ = Describe("NomadJob finalizer namespace threading", func() {
+	It("deregisters in spec.nomadNamespace, not default", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-ns-del-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		nj := &nomadv1alpha1.NomadJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name, Finalizers: []string{nomadJobFinalizer}},
+			Spec: nomadv1alpha1.NomadJobSpec{
+				ClusterRef:     nomadv1alpha1.JobClusterRef{Name: nc.Name},
+				JobID:          "web",
+				NomadNamespace: "team-a",
+				Job:            runtime.RawExtension{Raw: []byte(`{"type":"service"}`)},
+			},
+		}
+		Expect(k8s.Create(ctx, nj)).To(Succeed())
+		Expect(k8s.Delete(ctx, nj)).To(Succeed())
+		var got nomadv1alpha1.NomadJob
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "web", Namespace: ns.Name}, &got)).To(Succeed())
+
+		f := newFakeJobOps()
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.deregistered).To(ConsistOf("web"))
+		Expect(f.deregisteredNS).To(ConsistOf("team-a"), "must deregister in the job's namespace, not default")
 	})
 })
 

@@ -18,16 +18,17 @@ type fakeNomadJobOps struct {
 
 	getErr, planErr, registerErr, deregisterErr, summaryErr error
 
-	registered   []*api.Job // every RegisterJob arg, in order
-	deregistered []string   // every DeregisterJob jobID, in order
-	purged       []bool     // the purge flag for each DeregisterJob, in order
+	registered     []*api.Job // every RegisterJob arg, in order
+	deregistered   []string   // every DeregisterJob jobID, in order
+	deregisteredNS []string   // the namespace for each DeregisterJob, in order
+	purged         []bool     // the purge flag for each DeregisterJob, in order
 }
 
 func newFakeJobOps() *fakeNomadJobOps {
 	return &fakeNomadJobOps{jobs: map[string]*api.Job{}, summary: map[string]api.TaskGroupSummary{}}
 }
 
-func (f *fakeNomadJobOps) GetJob(_ context.Context, jobID string) (*api.Job, error) {
+func (f *fakeNomadJobOps) GetJob(_ context.Context, _ /*namespace*/ string, jobID string) (*api.Job, error) {
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
@@ -53,17 +54,18 @@ func (f *fakeNomadJobOps) RegisterJob(_ context.Context, job *api.Job) (string, 
 	return f.warnings, nil
 }
 
-func (f *fakeNomadJobOps) DeregisterJob(_ context.Context, jobID string, purge bool) error {
+func (f *fakeNomadJobOps) DeregisterJob(_ context.Context, namespace, jobID string, purge bool) error {
 	if f.deregisterErr != nil {
 		return f.deregisterErr
 	}
 	f.deregistered = append(f.deregistered, jobID)
+	f.deregisteredNS = append(f.deregisteredNS, namespace)
 	f.purged = append(f.purged, purge)
 	delete(f.jobs, jobID)
 	return nil
 }
 
-func (f *fakeNomadJobOps) JobGroupSummary(_ context.Context, _ string) (map[string]api.TaskGroupSummary, error) {
+func (f *fakeNomadJobOps) JobGroupSummary(_ context.Context, _ /*namespace*/ string, _ string) (map[string]api.TaskGroupSummary, error) {
 	if f.summaryErr != nil {
 		return nil, f.summaryErr
 	}

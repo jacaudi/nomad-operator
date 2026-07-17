@@ -13,7 +13,7 @@ func TestGetJob_NotFound(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "job not found", http.StatusNotFound)
 	})
-	job, err := c.GetJob(t.Context(), "missing")
+	job, err := c.GetJob(t.Context(), "default", "missing")
 	if err != nil || job != nil {
 		t.Fatalf("GetJob 404 = (%v, %v), want (nil, nil)", job, err)
 	}
@@ -69,7 +69,7 @@ func TestJobGroupSummary(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"JobID":"web","Summary":{"app":{"Running":2,"Starting":1}}}`))
 	})
-	got, err := c.JobGroupSummary(t.Context(), "web")
+	got, err := c.JobGroupSummary(t.Context(), "default", "web")
 	if err != nil {
 		t.Fatalf("JobGroupSummary: %v", err)
 	}
@@ -83,7 +83,53 @@ func TestDeregisterJob_OK(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"EvalID":"e1"}`))
 	})
-	if err := c.DeregisterJob(t.Context(), "web", true); err != nil {
+	if err := c.DeregisterJob(t.Context(), "default", "web", true); err != nil {
 		t.Fatalf("DeregisterJob: %v", err)
+	}
+}
+
+func TestGetJob_ScopesByNamespace(t *testing.T) {
+	var gotNS string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotNS = r.URL.Query().Get("namespace")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ID":"web"}`))
+	})
+	if _, err := c.GetJob(t.Context(), "team-a", "web"); err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if gotNS != "team-a" {
+		t.Fatalf("namespace = %q, want team-a", gotNS)
+	}
+}
+
+func TestDeregisterJob_ScopesByNamespace(t *testing.T) {
+	var gotNS string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotNS = r.URL.Query().Get("namespace")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"EvalID":"e"}`))
+	})
+	if err := c.DeregisterJob(t.Context(), "team-a", "web", true); err != nil {
+		t.Fatalf("DeregisterJob: %v", err)
+	}
+	if gotNS != "team-a" {
+		t.Fatalf("namespace = %q, want team-a", gotNS)
+	}
+}
+
+func TestRegisterJob_ScopesByJobNamespace(t *testing.T) {
+	var gotNS string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotNS = r.URL.Query().Get("namespace")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"EvalID":"e"}`))
+	})
+	id, nsName := "web", "team-a"
+	if _, err := c.RegisterJob(t.Context(), &api.Job{ID: &id, Namespace: &nsName}); err != nil {
+		t.Fatalf("RegisterJob: %v", err)
+	}
+	if gotNS != "team-a" {
+		t.Fatalf("namespace = %q, want team-a", gotNS)
 	}
 }

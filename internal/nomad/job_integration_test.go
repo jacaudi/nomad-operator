@@ -53,10 +53,10 @@ func TestJobLifecycleLive(t *testing.T) {
 	if _, err := c.RegisterJob(ctx, job); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	t.Cleanup(func() { _ = c.DeregisterJob(ctx, id, true) })
+	t.Cleanup(func() { _ = c.DeregisterJob(ctx, "default", id, true) })
 
 	// Info round-trips; capture the version.
-	got, err := c.GetJob(ctx, id)
+	got, err := c.GetJob(ctx, "default", id)
 	if err != nil || got == nil {
 		t.Fatalf("get: job=%v err=%v", got, err)
 	}
@@ -77,7 +77,7 @@ func TestJobLifecycleLive(t *testing.T) {
 	if _, err := c.RegisterJob(ctx, job); err != nil {
 		t.Fatalf("re-register: %v", err)
 	}
-	got2, err := c.GetJob(ctx, id)
+	got2, err := c.GetJob(ctx, "default", id)
 	if err != nil || got2 == nil {
 		t.Fatalf("get2: %v", err)
 	}
@@ -87,15 +87,15 @@ func TestJobLifecycleLive(t *testing.T) {
 	}
 
 	// Deregister with purge, then Deregister the now-missing job (§6.4).
-	if err := c.DeregisterJob(ctx, id, true); err != nil {
+	if err := c.DeregisterJob(ctx, "default", id, true); err != nil {
 		t.Fatalf("deregister: %v", err)
 	}
-	if err := c.DeregisterJob(ctx, id, true); err != nil && !IsNotFound(err) {
+	if err := c.DeregisterJob(ctx, "default", id, true); err != nil && !IsNotFound(err) {
 		t.Fatalf("§6.4: deregister-missing must be nil or 404, got %v", err)
 	}
 
 	// GetJob on a missing job → (nil, nil).
-	if p, err := c.GetJob(ctx, "does-not-exist-xyz"); err != nil || p != nil {
+	if p, err := c.GetJob(ctx, "default", "does-not-exist-xyz"); err != nil || p != nil {
 		t.Fatalf("missing get: job=%v err=%v (want nil,nil)", p, err)
 	}
 }

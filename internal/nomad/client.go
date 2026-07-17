@@ -49,6 +49,22 @@ func queryOpts(ctx context.Context) *api.QueryOptions {
 	return (&api.QueryOptions{}).WithContext(ctx)
 }
 
+// jobWriteOpts builds WriteOptions carrying the job's namespace (nil-safe). The
+// controller injects job.Namespace before Plan/Register, but the deref is
+// guarded so a nil Namespace from any caller cannot panic.
+func jobWriteOpts(ctx context.Context, job *api.Job) *api.WriteOptions {
+	w := &api.WriteOptions{}
+	if job != nil && job.Namespace != nil {
+		w.Namespace = *job.Namespace
+	}
+	return w.WithContext(ctx)
+}
+
+// nsQueryOpts builds QueryOptions scoped to a Nomad namespace.
+func nsQueryOpts(ctx context.Context, namespace string) *api.QueryOptions {
+	return (&api.QueryOptions{Namespace: namespace}).WithContext(ctx)
+}
+
 // ListNodes returns the node stubs registered with Nomad.
 func (c *Client) ListNodes(ctx context.Context) ([]*api.NodeListStub, error) {
 	nodes, _, err := c.api.Nodes().List(queryOpts(ctx))
@@ -182,9 +198,10 @@ func (c *Client) CountNodePoolJobs(ctx context.Context, name string) (int, error
 // jobDiffNone is Nomad's JobDiff.Type value when a Plan finds no changes.
 const jobDiffNone = "None"
 
-// GetJob returns the job by ID, or (nil, nil) if it does not exist.
-func (c *Client) GetJob(ctx context.Context, jobID string) (*api.Job, error) {
-	job, _, err := c.api.Jobs().Info(jobID, queryOpts(ctx))
+// GetJob returns the job by ID within the given Nomad namespace, or (nil, nil)
+// if it does not exist.
+func (c *Client) GetJob(ctx context.Context, namespace, jobID string) (*api.Job, error) {
+	job, _, err := c.api.Jobs().Info(jobID, nsQueryOpts(ctx, namespace))
 	if err != nil {
 		if IsNotFound(err) {
 			return nil, nil
@@ -199,7 +216,7 @@ func (c *Client) GetJob(ctx context.Context, jobID string) (*api.Job, error) {
 // The job must have a non-nil ID (Nomad's PlanOpts requires it); the caller
 // injects it.
 func (c *Client) PlanJob(ctx context.Context, job *api.Job) (bool, error) {
-	resp, _, err := c.api.Jobs().Plan(job, true, (&api.WriteOptions{}).WithContext(ctx))
+	resp, _, err := c.api.Jobs().Plan(job, true, jobWriteOpts(ctx, job))
 	if err != nil {
 		return false, fmt.Errorf("nomad: plan job: %w", err)
 	}
@@ -212,25 +229,27 @@ func (c *Client) PlanJob(ctx context.Context, job *api.Job) (bool, error) {
 // RegisterJob upserts the job (Nomad's Register is an upsert) and returns any
 // server warnings (e.g. deprecation notices).
 func (c *Client) RegisterJob(ctx context.Context, job *api.Job) (string, error) {
-	resp, _, err := c.api.Jobs().Register(job, (&api.WriteOptions{}).WithContext(ctx))
+	resp, _, err := c.api.Jobs().Register(job, jobWriteOpts(ctx, job))
 	if err != nil {
 		return "", fmt.Errorf("nomad: register job: %w", err)
 	}
 	return resp.Warnings, nil
 }
 
-// DeregisterJob stops and removes a job. purge=true fully removes the job record
-// (vs leaving a queryable dead record that would collide with a re-create).
-func (c *Client) DeregisterJob(ctx context.Context, jobID string, purge bool) error {
-	if _, _, err := c.api.Jobs().Deregister(jobID, purge, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+// DeregisterJob stops and removes a job within the given Nomad namespace.
+// purge=true fully removes the job record (vs leaving a queryable dead record
+// that would collide with a re-create).
+func (c *Client) DeregisterJob(ctx context.Context, namespace, jobID string, purge bool) error {
+	if _, _, err := c.api.Jobs().Deregister(jobID, purge, (&api.WriteOptions{Namespace: namespace}).WithContext(ctx)); err != nil {
 		return fmt.Errorf("nomad: deregister job %q: %w", jobID, err)
 	}
 	return nil
 }
 
-// JobGroupSummary returns per-task-group allocation summaries for the job.
-func (c *Client) JobGroupSummary(ctx context.Context, jobID string) (map[string]api.TaskGroupSummary, error) {
-	summary, _, err := c.api.Jobs().Summary(jobID, queryOpts(ctx))
+// JobGroupSummary returns per-task-group allocation summaries for the job within
+// the given Nomad namespace.
+func (c *Client) JobGroupSummary(ctx context.Context, namespace, jobID string) (map[string]api.TaskGroupSummary, error) {
+	summary, _, err := c.api.Jobs().Summary(jobID, nsQueryOpts(ctx, namespace))
 	if err != nil {
 		return nil, fmt.Errorf("nomad: job summary %q: %w", jobID, err)
 	}
