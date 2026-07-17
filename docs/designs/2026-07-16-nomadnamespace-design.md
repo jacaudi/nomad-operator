@@ -9,6 +9,8 @@ The minimal fix considered first was to *reject* non-default namespaces. The cho
 
 Every Nomad-domain claim below is grounded in `go doc` against the pinned `github.com/hashicorp/nomad/api` (`v0.0.0-20260707172059-5b83b133998a`, == v2.0.4). The namespace endpoint surface was verified during brainstorming (`Namespaces().Register/Delete/Info/List/PrefixList`, `api.Namespace{Name,Description,Quota,Capabilities,NodePoolConfiguration,Vault/Consul config,Meta,RequiredExtraClaims,OptionalExtraClaims,...}`). Exact server-side *wordings/patterns* (delete-refusal body, reserved set, name regex) are flagged as plan-time spikes (§6), the same discipline used for the NomadPool I-2 spike.
 
+> **Amended 2026-07-16** after an independent sr-go-engineer *design* review (Fable model), verdict *amend-before-planning* — no blocking issues; the root-cause orphan fix, the Nomad namespace API surface, the per-call namespace seam, the `NomadNamespaceOps` shape, and the `contract.go` pins were all verified SOUND against the pinned `api`. Folded corrections: **I-1** — `Jobs().List` returns **all** jobs including terminal ones (`JobListStub.Status` exists precisely because the list is unfiltered), so `status.jobCount` is defined as **total jobs in the namespace** (informational; the delete gate is `IsNamespaceNotEmpty` on the `Delete` call, never this count), and the §6.4 spike now separates namespace-scoping from terminal-`Status` filtering (the namespace wildcard `*` spans namespaces and does **not** filter job state). **I-2** — the `NomadJobOps` change is **3 methods gain a `namespace` parameter** (`GetJob`/`DeregisterJob`/`JobGroupSummary`) **+ 2 derive it from `job.Namespace`** with no signature change (`PlanJob`/`RegisterJob`); an earlier "four methods" phrasing in §4 was wrong and is corrected. **M-1** — the `*job.Namespace` read in `PlanJob`/`RegisterJob` is nil-guarded in the client method. **M-2** — the orphan fix assumes `spec.nomadNamespace` matches where the job actually lives; a dev-era non-default job predating the field must be recreated, not migrated in place (bounded — `v1alpha1` unreleased, no stored CRs). **M-3** — the §6.2 reserved-name spike must confirm `default` is the only server-reserved namespace name (`*`/`all` carry no namespace meaning). **M-4** — `spec.nomadNamespace` immutability follows from Nomad job identity `(namespace, jobID)`, stated at the field definition.
+
 ---
 
 ## 1. Background & framing
@@ -161,7 +163,7 @@ Control flow keeps the finalizer on **any** non-`IsNotFound` `Delete` error; `Is
 
 ### 3.6 Status — bounded
 
-- `status.jobCount` — count of non-terminal jobs in the namespace (`Jobs().List` scoped to the namespace, §4). Populated where it matters (the delete-blocked path; refreshed on steady-state resync), mirroring NomadPool's `jobCount`/`nodeCount`.
+- `status.jobCount` — total jobs in the namespace (`Jobs().List` scoped to the namespace, §4). **Informational**, not a gate: the delete-blocked decision is `IsNamespaceNotEmpty` on the `Delete` call, never this count. `Jobs().List` returns all jobs including terminal ones (SGE I-1), so this is a raw total unless the plan opts to filter non-terminal `JobListStub.Status`. Refreshed on the delete-blocked path and steady-state resync, mirroring NomadPool's `jobCount`.
 - `status.observedGeneration`, `status.conditions[Ready]`.
 
 No per-job or per-alloc mirroring — that belongs to `NomadJob`.
@@ -179,6 +181,8 @@ nomadNamespace: team-a           # immutable; default "default"; the Nomad names
 
 By-name coupling (no `namespaceRef`) is deliberate and consistent with the established stance (NomadJob design §9: *"a job targets a pool by name; coupling is by-name only, no CR-level dependency enforced in v1"*). `default` needs no `NomadNamespace` CR. If the named namespace does not exist, Nomad's `Register` errors → surfaced `Ready=False` and self-heals once the `NomadNamespace` CR lands.
 
+`spec.nomadNamespace` is **immutable** (CEL) because Nomad job identity is `(namespace, jobID)` — changing the namespace names a *different* job (§1.1). This mirrors `spec.jobID`'s immutability rationale (`nomadjob_types.go`), not an arbitrary restriction (SGE M-4).
+
 **Identity injection (mirrors `spec.jobID`).** In `decodeJob`, after decoding and the jobID-mismatch check:
 - If the blob's `job.Namespace` is non-empty and `!= spec.nomadNamespace` → reject with `reason=NamespaceMismatch` (`spec.nomadNamespace` is authoritative — invalid states unrepresentable).
 - Otherwise inject `job.Namespace = &spec.nomadNamespace`.
@@ -190,9 +194,11 @@ The prior "reject non-default namespace" guard is **superseded** and not built.
 - `GetJob(ctx, namespace, jobID)` — `QueryOptions.Namespace`
 - `DeregisterJob(ctx, namespace, jobID, purge)` — `WriteOptions.Namespace`
 - `JobGroupSummary(ctx, namespace, jobID)` — `QueryOptions.Namespace`
-- `PlanJob(ctx, job)` / `RegisterJob(ctx, job)` — set `WriteOptions.Namespace = *job.Namespace` (already carries it post-injection)
+- `PlanJob(ctx, job)` / `RegisterJob(ctx, job)` — set `WriteOptions.Namespace` from `job.Namespace` (already carries it post-injection; the deref is **nil-guarded** in the client method — SGE M-1)
 
 **The finalizer reads `spec.nomadNamespace` directly** (`finalizeJob` never decodes the blob) → `DeregisterJob(ctx, nj.Spec.NomadNamespace, jobID, true)` hits the right namespace → **the orphan is impossible.** This is the root-cause fix; a currently-invalid blob no longer breaks deletion.
+
+**Caveat (SGE M-2):** the fix assumes `spec.nomadNamespace` matches where the job actually lives. A dev-era job registered into a non-default namespace *before* this field existed defaults to `default` (immutable) on upgrade → `NamespaceMismatch` on reconcile and a `default`-namespace Deregister on delete → the orphan would recur. Such a CR must be **recreated, not migrated in place**. This is bounded and acceptable: `v1alpha1` is unreleased with no production-stored CRs (§9).
 
 **Region parity (unchanged).** `decodeJob` continues to inject `job.Region = nc.Spec.Region`, and the client stays region-scoped via `clusterNomadConfig` (`api.Config.Region`). Namespace is orthogonal to region: it is the one dimension threaded per-call (§3.7 above), because a single region-scoped client serves every namespace.
 
@@ -214,14 +220,14 @@ type NomadNamespaceOps interface {
 
 Built by a `NewNomadNamespaceClient` factory (faked in envtest); config via the existing `clusterNomadConfig` helper (DRY).
 
-**`NomadJobOps` (existing) gains a namespace parameter** on the four namespace-sensitive methods (§3.7). Its fake is updated accordingly.
+**`NomadJobOps` (existing) namespace change (§3.7, SGE I-2):** three methods gain an explicit `namespace` parameter (`GetJob`/`DeregisterJob`/`JobGroupSummary`); the two that take a full `*api.Job` (`PlanJob`/`RegisterJob`) derive it from `job.Namespace` with **no signature change**. Its fake is updated accordingly.
 
 **Additive `internal/nomad.Client` methods**, each backed by a real `api` call:
 - `GetNamespace` (`Namespaces().Info`; `(nil,nil)` on 404 via the existing `IsNotFound`/`errors.AsType` pattern).
 - `UpsertNamespace` (`Namespaces().Register`).
 - `DeleteNamespace` (`Namespaces().Delete`).
 - `CountNamespaceJobs` (`Jobs().List` with `QueryOptions.Namespace = name`, returns `len`).
-- The four `*Job` methods gain a `namespace` argument setting `Query/WriteOptions.Namespace`.
+- `GetJob`/`DeregisterJob`/`JobGroupSummary` gain a `namespace` argument setting `Query/WriteOptions.Namespace`; `PlanJob`/`RegisterJob` set `WriteOptions.Namespace` from `job.Namespace` (nil-guarded — SGE M-1).
 
 **New error helper** in `internal/nomad/errors.go`: `IsNamespaceNotEmpty(err) bool` — `errors.AsType[api.UnexpectedResponseError]` + body-substring match on Nomad's namespace-delete refusal wording (exact string a plan-time spike, §6), mirroring `IsNodePoolNotEmpty`.
 
@@ -254,9 +260,9 @@ Pin rule (from Foundation): only pin symbols a real call exercises.
 These follow the project's "pin against real calls" discipline (the NomadPool I-2 spike pattern):
 
 1. **Namespace-delete refusal wording** — the exact v2.0.4 error body when `Namespaces().Delete` refuses a namespace holding non-terminal jobs, so `IsNamespaceNotEmpty` matches by substring. Resolved in the §8 integration spike.
-2. **Reserved-name set** — confirm `default` is the only unmanageable/undeletable namespace name (and whether any other is reserved), for the CEL + Go guard.
+2. **Reserved-name set** — confirm `default` is the only server-reserved / unmanageable / undeletable namespace name (and that `*`/`all` carry no namespace meaning — SGE M-3), for the CEL + Go guard.
 3. **Namespace-name regex** — confirm Nomad v2.0.4's exact validation pattern for the `namespaceName` CEL rule (server-side in `structs`, so a plan-time item like the jobID regex).
-4. **Namespace-scoped job count** — confirm `Jobs().List` with `QueryOptions.Namespace` returns only that namespace's jobs (for `jobCount`), and whether a wildcard is needed to exclude terminal jobs.
+4. **Namespace-scoped job count** — confirm `Jobs().List` with `QueryOptions.Namespace` returns that namespace's jobs (for `jobCount`). Note (SGE I-1): the namespace wildcard `*` spans **namespaces** and does **not** filter job state — `Jobs().List` returns terminal jobs too, so decide separately whether `jobCount` should filter non-terminal `JobListStub.Status` (a `Status` check, orthogonal to namespace scoping) or stay a raw total.
 5. **`Register` create-vs-update dedup** — whether a read-modify-write skip is sufficient or a Register of an unchanged namespace churns `ModifyIndex` (compare-before-write already guards this; confirm in the spike).
 
 ---
