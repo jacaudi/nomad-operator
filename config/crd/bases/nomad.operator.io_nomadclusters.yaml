@@ -359,6 +359,9 @@ spec:
                       type: string
                     status:
                       type: string
+                    voter:
+                      description: Voter reports whether this server is a raft voter.
+                      type: boolean
                   required:
                   - addr
                   - leader

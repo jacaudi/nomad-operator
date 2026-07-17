@@ -185,6 +185,9 @@ type MemberStatus struct {
 	Addr   string `json:"addr"`
 	Status string `json:"status"`
 	Leader bool   `json:"leader"`
+	// Voter reports whether this server is a raft voter.
+	// +optional
+	Voter bool `json:"voter,omitempty"`
 }
 
 // NomadClusterStatus defines the observed state of NomadCluster.
