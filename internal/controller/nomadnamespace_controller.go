@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
+	"github.com/jacaudi/nomad-operator/internal/nomad"
 )
 
 const (
@@ -184,12 +185,59 @@ func desiredNamespace(existing *api.Namespace, nn *nomadv1alpha1.NomadNamespace)
 	return &d
 }
 
-// finalizeNamespace is filled in Task 7; here it only drops the finalizer so the
-// skeleton compiles and a delete does not hang.
+// finalizeNamespace deletes the Nomad namespace when the CR is deleted, gated so
+// it never deadlocks a cascade: if the cluster is gone OR going, drop the
+// finalizer without calling Delete (control plane gone/going ⇒ namespace too).
+// Closes both background and foreground cascade (design §3.5).
 func (r *NomadNamespaceReconciler) finalizeNamespace(ctx context.Context, nn *nomadv1alpha1.NomadNamespace) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(nn, nomadNamespaceFinalizer) {
 		return ctrl.Result{}, nil
 	}
+
+	var nc nomadv1alpha1.NomadCluster
+	err := r.Get(ctx, types.NamespacedName{Name: nn.Spec.ClusterRef.Name, Namespace: nn.Namespace}, &nc)
+	clusterGoneOrGoing := apierrors.IsNotFound(err) || (err == nil && !nc.DeletionTimestamp.IsZero())
+	if clusterGoneOrGoing {
+		return ctrl.Result{}, r.dropNamespaceFinalizer(ctx, nn)
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if nc.Status.Phase != nomadv1alpha1.PhaseReady {
+		setNamespaceCondition(nn, nomadv1alpha1.NomadNamespaceCondDeleteBlocked, metav1.ConditionTrue, nomadv1alpha1.ReasonClusterNotReady, "cluster not Ready; cannot confirm namespace deletion")
+		if uerr := r.Status().Update(ctx, nn); uerr != nil {
+			return ctrl.Result{}, uerr
+		}
+		return ctrl.Result{RequeueAfter: namespaceResync}, nil
+	}
+
+	cfg, err := clusterNomadConfig(ctx, r.Client, &nc)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	ops, err := r.NewNomadClient(cfg)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if derr := ops.DeleteNamespace(ctx, nn.Spec.NamespaceName); derr != nil && !nomad.IsNotFound(derr) {
+		// Delete failed for a reason other than "already gone". Keep the
+		// finalizer and requeue. Surface a friendly reason when the namespace is
+		// non-empty; fetch the job count so the user sees what holds it.
+		reason := nomadv1alpha1.ReasonDeleteFailed
+		if nomad.IsNamespaceNotEmpty(derr) {
+			reason = nomadv1alpha1.ReasonNamespaceNotEmpty
+		}
+		if jobs, e := ops.CountNamespaceJobs(ctx, nn.Spec.NamespaceName); e == nil {
+			nn.Status.JobCount = jobs
+		}
+		setNamespaceCondition(nn, nomadv1alpha1.NomadNamespaceCondDeleteBlocked, metav1.ConditionTrue, reason, derr.Error())
+		if uerr := r.Status().Update(ctx, nn); uerr != nil {
+			return ctrl.Result{}, uerr
+		}
+		return ctrl.Result{RequeueAfter: namespaceResync}, nil
+	}
+	// Delete succeeded OR the namespace is already gone (404) — drop the finalizer.
 	return ctrl.Result{}, r.dropNamespaceFinalizer(ctx, nn)
 }
 

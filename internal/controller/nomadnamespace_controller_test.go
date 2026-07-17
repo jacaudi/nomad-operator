@@ -1,11 +1,16 @@
 package controller
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+
 	"github.com/hashicorp/nomad/api"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -14,7 +19,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
+	"github.com/jacaudi/nomad-operator/internal/nomad"
 )
+
+// notEmptyErr returns a genuine "namespace has non-terminal jobs" error by
+// round-tripping a 400 through a throwaway nomad client — the proven pattern the
+// job controller tests use to obtain a real api.UnexpectedResponseError. No
+// production test-seam is added.
+func notEmptyErr() error {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `namespace "team-a" has non-terminal jobs`, http.StatusBadRequest)
+	}))
+	DeferCleanup(srv.Close)
+	c, err := nomad.New(nomad.Config{Address: srv.URL})
+	Expect(err).NotTo(HaveOccurred())
+	return c.DeleteNamespace(context.Background(), "team-a")
+}
 
 var _ = Describe("NomadNamespace reconciler: cluster resolution", func() {
 	It("sets ClusterNotFound and adds the finalizer when the cluster is missing", func(ctx SpecContext) {
@@ -161,5 +181,70 @@ var _ = Describe("NomadNamespace reconciler: conflict", func() {
 		cond := meta.FindStatusCondition(got.Status.Conditions, nomadv1alpha1.NomadNamespaceCondReady)
 		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonNamespaceNameConflict))
 		Expect(f.registered).To(BeEmpty())
+	})
+})
+
+var _ = Describe("NomadNamespace reconciler: finalize", func() {
+	newNS := func(ctx SpecContext, k8sNS, cluster string, del bool) *nomadv1alpha1.NomadNamespace {
+		nn := &nomadv1alpha1.NomadNamespace{
+			ObjectMeta: metav1.ObjectMeta{Name: "team-a", Namespace: k8sNS, Finalizers: []string{nomadNamespaceFinalizer}},
+			Spec:       nomadv1alpha1.NomadNamespaceSpec{ClusterRef: nomadv1alpha1.NamespaceClusterRef{Name: cluster}, NamespaceName: "team-a"},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+		Expect(k8s.Delete(ctx, nn)).To(Succeed()) // sets DeletionTimestamp; finalizer holds it
+		var got nomadv1alpha1.NomadNamespace
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "team-a", Namespace: k8sNS}, &got)).To(Succeed())
+		return &got
+	}
+
+	It("deletes the namespace and drops the finalizer when the cluster is Ready and it is empty", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-fin-ok-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		nn := newNS(ctx, ns.Name, nc.Name, true)
+
+		f := newFakeNamespaceOps()
+		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nn.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.deleted).To(ConsistOf("team-a"))
+		// CR should now be gone (finalizer dropped → GC).
+		var got nomadv1alpha1.NomadNamespace
+		Expect(apierrors.IsNotFound(k8s.Get(ctx, types.NamespacedName{Name: nn.Name, Namespace: ns.Name}, &got))).To(BeTrue())
+	})
+
+	It("holds with NamespaceNotEmpty when Delete is refused for non-terminal jobs", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-fin-busy-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		nn := newNS(ctx, ns.Name, nc.Name, true)
+
+		f := newFakeNamespaceOps()
+		f.jobCount = 2
+		f.deleteErr = notEmptyErr() // a genuine "not empty" api.UnexpectedResponseError the classifier matches
+		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nn.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		var got nomadv1alpha1.NomadNamespace
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: nn.Name, Namespace: ns.Name}, &got)).To(Succeed())
+		cond := meta.FindStatusCondition(got.Status.Conditions, nomadv1alpha1.NomadNamespaceCondDeleteBlocked)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonNamespaceNotEmpty))
+		Expect(got.Status.JobCount).To(Equal(2))
+		Expect(controllerutil.ContainsFinalizer(&got, nomadNamespaceFinalizer)).To(BeTrue())
+	})
+
+	It("short-circuits (drops finalizer, no Delete) when the cluster is gone", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-fin-gone-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nn := newNS(ctx, ns.Name, "missing-cluster", true)
+
+		f := newFakeNamespaceOps()
+		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nn.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.deleted).To(BeEmpty(), "must not call Delete when cluster is gone")
+		var got nomadv1alpha1.NomadNamespace
+		Expect(apierrors.IsNotFound(k8s.Get(ctx, types.NamespacedName{Name: nn.Name, Namespace: ns.Name}, &got))).To(BeTrue())
 	})
 })
