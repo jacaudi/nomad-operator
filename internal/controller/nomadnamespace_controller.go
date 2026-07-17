@@ -18,8 +18,10 @@ package controller
 
 import (
 	"context"
+	"maps"
 	"time"
 
+	"github.com/hashicorp/nomad/api"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -118,16 +120,54 @@ func (r *NomadNamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return r.reconcileNamespace(ctx, &nn, ops)
 }
 
-// reconcileNamespace applies the declared namespace onto Nomad and derives
-// status. Reserved-name guard + upsert (Task 5) and conflict detection (Task 6)
-// are layered in; this stub only marks Ready so the skeleton is exercisable.
-func (r *NomadNamespaceReconciler) reconcileNamespace(ctx context.Context, nn *nomadv1alpha1.NomadNamespace, _ NomadNamespaceOps) (ctrl.Result, error) {
+// reconcileNamespace applies the declared namespace onto Nomad (read-modify-write,
+// preserving unmanaged fields) and derives status. Conflict detection (Task 6) is
+// layered in.
+func (r *NomadNamespaceReconciler) reconcileNamespace(ctx context.Context, nn *nomadv1alpha1.NomadNamespace, ops NomadNamespaceOps) (ctrl.Result, error) {
+	// Defense-in-depth guard: CEL already rejects "default" at admission, but
+	// never Register/Delete it even if one reaches here.
+	if nn.Spec.NamespaceName == "default" {
+		setNamespaceCondition(nn, nomadv1alpha1.NomadNamespaceCondReady, metav1.ConditionFalse, nomadv1alpha1.ReasonReservedNamespace, "the default namespace is built-in and cannot be managed")
+		nn.Status.ObservedGeneration = nn.Generation
+		return ctrl.Result{}, r.Status().Update(ctx, nn)
+	}
+
+	existing, err := ops.GetNamespace(ctx, nn.Spec.NamespaceName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	desired := desiredNamespace(existing, nn)
+	if existing == nil || existing.Description != desired.Description || !maps.Equal(existing.Meta, desired.Meta) {
+		if err := ops.UpsertNamespace(ctx, desired); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	count, err := ops.CountNamespaceJobs(ctx, nn.Spec.NamespaceName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	nn.Status.JobCount = count
+
 	setNamespaceCondition(nn, nomadv1alpha1.NomadNamespaceCondReady, metav1.ConditionTrue, nomadv1alpha1.ReasonRegistered, "namespace registered onto Nomad")
 	nn.Status.ObservedGeneration = nn.Generation
 	if err := r.Status().Update(ctx, nn); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: namespaceResync}, nil
+}
+
+// desiredNamespace builds the Namespace to Register: managed fields (Description,
+// Meta) from spec, unmanaged fields (Quota, Capabilities, NodePoolConfiguration,
+// Vault/Consul config, extra-claims) preserved from the existing namespace.
+func desiredNamespace(existing *api.Namespace, nn *nomadv1alpha1.NomadNamespace) *api.Namespace {
+	var d api.Namespace
+	if existing != nil {
+		d = *existing // preserve Quota, Capabilities, config blocks, indexes
+	}
+	d.Name = nn.Spec.NamespaceName
+	d.Description = nn.Spec.Description
+	d.Meta = nn.Spec.Meta
+	return &d
 }
 
 // finalizeNamespace is filled in Task 7; here it only drops the finalizer so the
