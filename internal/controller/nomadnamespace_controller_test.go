@@ -247,4 +247,25 @@ var _ = Describe("NomadNamespace reconciler: finalize", func() {
 		var got nomadv1alpha1.NomadNamespace
 		Expect(apierrors.IsNotFound(k8s.Get(ctx, types.NamespacedName{Name: nn.Name, Namespace: ns.Name}, &got))).To(BeTrue())
 	})
+
+	// Guards the Terminating-but-present half of clusterGoneOrGoing — the
+	// NomadPool §3.4 foreground-cascade-deadlock fix and the reason this task
+	// exists. SetControllerReference sets BlockOwnerDeletion, so a Terminating
+	// cluster is present-with-DeletionTimestamp (NOT NotFound); the reconcile
+	// must still short-circuit without a Delete. Reuses the shared
+	// mustCreateTerminatingCluster (nomadpool_controller_test.go).
+	It("short-circuits (drops finalizer, no Delete) when the cluster is present but Terminating", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-fin-terminating-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := mustCreateTerminatingCluster(ctx, ns.Name)
+		nn := newNS(ctx, ns.Name, nc.Name, true)
+
+		f := newFakeNamespaceOps()
+		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nn.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.deleted).To(BeEmpty(), "must not call Delete when cluster is Terminating")
+		var got nomadv1alpha1.NomadNamespace
+		Expect(apierrors.IsNotFound(k8s.Get(ctx, types.NamespacedName{Name: nn.Name, Namespace: ns.Name}, &got))).To(BeTrue())
+	})
 })
