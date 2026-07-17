@@ -30,6 +30,8 @@
 - **Signed commits** need 1Password Touch ID; on a `failed to fill whole buffer` error STOP and ask — never disable `commit.gpgsign`.
 - **Repo is LOCAL-ONLY** — do not push.
 
+> **Amended 2026-07-17** after an independent sr-go-engineer *plan* review (Opus), verdict *amend-before-execution*, 1 blocking. Verified SOUND and not re-litigated: API correctness against the pin (`AutopilotServerHealth` arity/fields, contract-pin style), every edit anchor (`NomadOps` 47-52, struct 63-67, Reconcile overwrite 121-122, leader gate 200-215, Degraded-only-on-leader-loss), `NomadOps` isolation (only `fakeNomad` implements it; the other four fakes are separate interfaces, so adding `ServerHealth` breaks nothing), no existing test asserts the old `"3/3"` quorum, `record.FakeRecorder` event formatting matches the substring assertions, gate commands, design fidelity, and both rejections. Folded: **B1** — `driftTo` used the wrong Gateway name `name+"-gw"`; the real name is `names(nc).Gateway == nc.Name+"-gateway"` (names.go:37) → fixed in Task 4 Step 1. **M1** — Task 3 Step 4 now also deletes the stale `nomadcluster_controller.go:210-213` "deferred to slice 6" comment that C makes false. **M2** — Task 1's projection test goes in a NEW file `internal/nomad/client_projection_test.go` to avoid import-merge churn with the existing `client_test.go`.
+
 ---
 
 ## File Structure
@@ -37,6 +39,7 @@
 - `internal/nomad/client.go` — **modify**: add `NomadMember` type + `ServerHealth` method (Task 1).
 - `internal/nomad/contract.go` — **modify**: pin `Operator`, `AutopilotServerHealth`, `OperatorHealthReply`, `ServerHealth` (Task 1).
 - `internal/controller/nomadcluster_controller.go` — **modify**: `NomadOps` gains `ServerHealth` (Task 1); `bootstrapAndReady` populates members/quorum (Task 3); `Reconcile` + new `checkAddressDrift` (Task 4); `Recorder` field + `SetupWithManager` wiring (Task 4).
+- `internal/nomad/client_projection_test.go` — **create**: unit test for the `toMembers` projection (Task 1).
 - `internal/controller/fake_nomad_test.go` — **modify**: fake `ServerHealth` (Task 1).
 - `api/v1alpha1/nomadcluster_types.go` — **modify**: `MemberStatus.Voter` field (Task 2); `CondRaftAddressDrift` constant (Task 4).
 - `internal/controller/status_members.go` — **create**: `toMemberStatus` + `quorumString` helpers (Task 3).
@@ -53,12 +56,12 @@
 - Modify: `internal/nomad/contract.go`
 - Modify: `internal/controller/nomadcluster_controller.go:47-52` (the `NomadOps` interface)
 - Modify: `internal/controller/fake_nomad_test.go`
-- Test: `internal/nomad/client_test.go` (add), plus the contract pin compiles
+- Create: `internal/nomad/client_projection_test.go` (new file — avoids import-merge churn with the existing `client_test.go`), plus the contract pin compiles
 
 **Interfaces:**
 - Produces: `nomad.NomadMember{Name, Addr, Status string; Leader, Voter bool}` and `nomad.Client.ServerHealth(ctx context.Context) ([]nomad.NomadMember, error)`; `NomadOps.ServerHealth(ctx) ([]nomad.NomadMember, error)`; `fakeNomad.ServerHealth`. Task 3 consumes these.
 
-- [ ] **Step 1: Write the failing test** for the projection mapping in `internal/nomad/client_test.go`.
+- [ ] **Step 1: Write the failing test** for the projection mapping in a NEW file `internal/nomad/client_projection_test.go` (the existing `client_test.go` already imports `testing`+`api` and defines an httptest `fakeNomad` helper — a new file sidesteps any import-merge collision).
 
 There is no live Nomad in unit tests, so test the pure projection helper. First extract the mapping into a package-level function so it is unit-testable without a server. Write the test:
 
@@ -193,7 +196,7 @@ Expected: build clean (`*nomad.Client` and `fakeNomad` both satisfy `NomadOps`);
 - [ ] **Step 9: Commit**
 
 ```bash
-git add internal/nomad/client.go internal/nomad/client_test.go internal/nomad/contract.go internal/controller/nomadcluster_controller.go internal/controller/fake_nomad_test.go
+git add internal/nomad/client.go internal/nomad/client_projection_test.go internal/nomad/contract.go internal/controller/nomadcluster_controller.go internal/controller/fake_nomad_test.go
 git commit -m "feat(nomad): ServerHealth read + NomadMember projection + NomadOps method
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -366,16 +369,21 @@ func quorumString(members []nomad.NomadMember) string {
 }
 ```
 
-- [ ] **Step 4: Populate status in `bootstrapAndReady`.** In `internal/controller/nomadcluster_controller.go`, replace the fabricated quorum line. The current code (~lines 214-215) reads:
+- [ ] **Step 4: Populate status in `bootstrapAndReady`.** In `internal/controller/nomadcluster_controller.go`, replace the stale slice-6 deferral comment AND the fabricated quorum line. The current code (~lines 210-215) reads:
 
 ```go
+	// status.leader carries the raw "ip:port" from Status().Leader(). Mapping it
+	// to a friendly "<name>-server-N.<region>" and populating status.members from
+	// Status().Peers() are DEFERRED to slice 6 (hardening) — noted so they are not
+	// silently dropped; the DoD only requires leader/quorum be populated.
 	nc.Status.Leader = leader
 	nc.Status.Quorum = fmt.Sprintf("%d/%d", nc.Spec.Servers, nc.Spec.Servers)
 ```
 
-Replace with (the read is placed AFTER the leader gate at line 209 — per design M-1):
+Replace that whole block (comment + both assignments) with (the read is placed AFTER the leader gate at line 209 — per design M-1; the deferral comment is now false and must go — review M1):
 
 ```go
+	// status.leader carries the raw "ip:port" from Status().Leader().
 	nc.Status.Leader = leader
 	// Real quorum + members from autopilot health. Placed after the leader
 	// gate; a read error must not flip Ready->Degraded (Degraded is entered
@@ -459,7 +467,8 @@ var _ = Describe("advertise.rpc drift guard", func() {
 
 	driftTo := func(ctx context.Context, name, ns, addrB string, r *NomadClusterReconciler) nomadv1alpha1.NomadCluster {
 		var gw gwapiv1.Gateway
-		Expect(k8s.Get(ctx, types.NamespacedName{Name: name + "-gw", Namespace: ns}, &gw)).To(Succeed())
+		// names(nc).Gateway == nc.Name + "-gateway" (internal/controller/names.go:37).
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: name + "-gateway", Namespace: ns}, &gw)).To(Succeed())
 		gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: addrB}}
 		Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
 		reconcileOnce(r, name, ns)
