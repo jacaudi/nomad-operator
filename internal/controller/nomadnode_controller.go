@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
@@ -65,13 +66,14 @@ func (r *NomadNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	bound, dupes := bindNodes(stubs)
+	owners := resolveCollisionOwners(bound)
 	// One node's failure must not stall the whole cluster's reflection: keep the
 	// failed stub in bound (so pruneAbsent won't delete a healthy CR), accumulate
 	// its error, and still run markDuplicates + pruneAbsent. A non-nil joined
 	// error is returned so genuinely-transient per-node failures still retry.
 	var errs []error
 	for _, stub := range bound {
-		if err := r.upsertNode(ctx, &nc, stub, ops); err != nil {
+		if err := r.upsertNode(ctx, &nc, stub, owners, ops); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -125,15 +127,43 @@ func bindNodes(stubs []*api.NodeListStub) (map[string]*api.NodeListStub, map[str
 	return bound, dupes
 }
 
+// resolveCollisionOwners maps each sanitized object name to the single Nomad
+// node Name that owns its CR when multiple distinct Names sanitize to the same
+// object name. The owner is chosen deterministically (lowest CreateIndex, then
+// Name), so ownership never flaps with map-iteration order (M-1).
+func resolveCollisionOwners(bound map[string]*api.NodeListStub) map[string]string {
+	best := map[string]*api.NodeListStub{}
+	for _, stub := range bound {
+		obj := sanitizeNodeName(stub.Name)
+		cur, ok := best[obj]
+		if !ok || stub.CreateIndex < cur.CreateIndex ||
+			(stub.CreateIndex == cur.CreateIndex && stub.Name < cur.Name) {
+			best[obj] = stub
+		}
+	}
+	owners := make(map[string]string, len(best))
+	for obj, stub := range best {
+		owners[obj] = stub.Name
+	}
+	return owners
+}
+
 // upsertNode creates-or-updates the NomadNode for one bound stub: sanitized
 // metadata.name, ownerRef to the cluster, spec seeded ONCE at create, status
 // mirrored every pass, then desired state driven onto Nomad.
-func (r *NomadNodeReconciler) upsertNode(ctx context.Context, nc *nomadv1alpha1.NomadCluster, stub *api.NodeListStub, ops NomadNodeOps) error {
+func (r *NomadNodeReconciler) upsertNode(ctx context.Context, nc *nomadv1alpha1.NomadCluster, stub *api.NodeListStub, owners map[string]string, ops NomadNodeOps) error {
 	objName := sanitizeNodeName(stub.Name)
 	var nn nomadv1alpha1.NomadNode
 	err := r.Get(ctx, types.NamespacedName{Name: objName, Namespace: nc.Namespace}, &nn)
 	switch {
 	case apierrors.IsNotFound(err):
+		// Only the deterministic owner mints the CR; a colliding loser skips so
+		// ownership never flaps with map-iteration order (M-1).
+		if owners[objName] != stub.Name {
+			log.FromContext(ctx).Info("skipping node whose sanitized name collides with the owner",
+				"node", stub.Name, "object", objName, "owner", owners[objName])
+			return nil
+		}
 		nn = nomadv1alpha1.NomadNode{
 			ObjectMeta: metav1.ObjectMeta{Name: objName, Namespace: nc.Namespace, Labels: names(nc).Labels()},
 			Spec: nomadv1alpha1.NomadNodeSpec{
@@ -161,12 +191,12 @@ func (r *NomadNodeReconciler) upsertNode(ctx context.Context, nc *nomadv1alpha1.
 	case err != nil:
 		return err
 	}
-	// Sanitization collision: a DIFFERENT node's Name maps to this object name.
-	// Refuse to hijack the existing CR — surface DuplicateNodeName and skip
-	// driving/mirroring (design §3.1/§3.2).
+	// An existing CR is owned by its Spec.NodeName; a different colliding node
+	// must not hijack it or clobber its status — skip deterministically (M-1).
 	if nn.Spec.NodeName != stub.Name {
-		setNodeCondition(&nn, nomadv1alpha1.NomadNodeCondReconciled, metav1.ConditionFalse, nomadv1alpha1.ReasonDuplicateNodeName, "another node's Name sanitizes to this object name")
-		return r.Status().Update(ctx, &nn)
+		log.FromContext(ctx).Info("skipping node whose sanitized name collides with an existing owner",
+			"node", stub.Name, "object", objName, "owner", nn.Spec.NodeName)
+		return nil
 	}
 	// Drive desired state onto Nomad (Task 7 fills driveDesired), then mirror.
 	if err := r.driveDesired(ctx, &nn, stub, ops); err != nil {

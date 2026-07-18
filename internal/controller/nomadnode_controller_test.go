@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	nomadv1alpha1 "github.com/jacaudi/nomad-operator/api/v1alpha1"
 )
@@ -398,5 +399,38 @@ var _ = Describe("NomadNode reflector: prune + cascade", func() {
 		cond := meta.FindStatusCondition(nn.Status.Conditions, nomadv1alpha1.NomadNodeCondReconciled)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonClusterNotReady))
+	})
+
+	It("picks a deterministic owner across sanitize-collisions and does not flap (M-1)", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-m1-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		// "web_1" and "web-1" both sanitize to "web-1" (sanitizeNodeName maps the
+		// underscore to a dash but preserves a literal dash unchanged). Lower
+		// CreateIndex owns.
+		fake := &fakeNodeOps{list: []*api.NodeListStub{
+			{ID: "a", Name: "web_1", Status: "ready", SchedulingEligibility: "eligible", CreateIndex: 10},
+			{ID: "b", Name: "web-1", Status: "ready", SchedulingEligibility: "eligible", CreateIndex: 20},
+		}}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+
+		assertOwner := func() {
+			var nn nomadv1alpha1.NomadNode
+			Expect(k8s.Get(ctx, types.NamespacedName{Name: "web-1", Namespace: ns.Name}, &nn)).To(Succeed())
+			Expect(nn.Spec.NodeName).To(Equal("web_1"), "lowest CreateIndex owns the object name")
+			Expect(meta.IsStatusConditionTrue(nn.Status.Conditions, nomadv1alpha1.NomadNodeCondReconciled)).To(BeTrue(),
+				"owner CR must stay Reconciled=True, not flap to DuplicateNodeName")
+			// The colliding loser mints no CR of its own.
+			var list nomadv1alpha1.NomadNodeList
+			Expect(k8s.List(ctx, &list, client.InNamespace(ns.Name))).To(Succeed())
+			Expect(list.Items).To(HaveLen(1))
+		}
+
+		// Run twice; ownership + condition must be stable across passes.
+		for range 2 {
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+			Expect(err).NotTo(HaveOccurred())
+			assertOwner()
+		}
 	})
 })
