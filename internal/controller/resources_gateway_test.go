@@ -404,4 +404,97 @@ var _ = Describe("Existing-mode gateway reason (#6)", func() {
 		reconcileOnce(r, "c", ns)
 		Expect(reasonFor("c", ns)).To(Equal("WaitingForAddress"))
 	})
+
+	// FIX 2: the RPC-listener NamespaceNotAdmitted branch (resources_gateway.go
+	// ~:192) was untested — only the HTTP-listener branch had coverage. A
+	// Gateway whose HTTP listener admits the CR's namespace but whose RPC-0
+	// listener does not must still report NamespaceNotAdmitted. This is the
+	// not-yet-provisioned path, so the specific reason IS set.
+	It("reports NamespaceNotAdmitted when an RPC listener's allowedRoutes excludes the CR's namespace", func() {
+		ctx := context.Background()
+		ns := "ex-rpc-nsselect"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, ns)
+		// HTTP listener admits all namespaces; the ordinal-0 RPC listener uses a
+		// namespace Selector, which this operator treats as fail-closed. The
+		// failure must therefore be attributable to the RPC listener alone —
+		// exercising the RPC-branch NamespaceNotAdmitted path, not the HTTP one.
+		admitAll := &gwapiv1.AllowedRoutes{Namespaces: &gwapiv1.RouteNamespaces{From: new(gwapiv1.NamespacesFromAll)}}
+		excludeSelector := &gwapiv1.AllowedRoutes{Namespaces: &gwapiv1.RouteNamespaces{
+			From:     new(gwapiv1.NamespacesFromSelector),
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"gateway-tenant": "none-match-this-namespace"}},
+		}}
+		gw := &gwapiv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: ns},
+			Spec: gwapiv1.GatewaySpec{
+				GatewayClassName: "cilium",
+				Listeners: []gwapiv1.Listener{
+					{Name: listenerNameHTTP, Port: gwapiv1.PortNumber(portHTTP), Protocol: gwapiv1.TLSProtocolType,
+						Hostname: ptrHostname("nomad.example.com"), TLS: &gwapiv1.GatewayTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)},
+						AllowedRoutes: admitAll},
+					{Name: gwapiv1.SectionName(listenerNameRPC(0)), Port: 14647, Protocol: gwapiv1.TCPProtocolType, AllowedRoutes: excludeSelector},
+					{Name: gwapiv1.SectionName(listenerNameRPC(1)), Port: 24647, Protocol: gwapiv1.TCPProtocolType, AllowedRoutes: admitAll},
+					{Name: gwapiv1.SectionName(listenerNameRPC(2)), Port: 34647, Protocol: gwapiv1.TCPProtocolType, AllowedRoutes: admitAll},
+				},
+			},
+		}
+		Expect(k8s.Create(ctx, gw)).To(Succeed())
+		Expect(k8s.Create(ctx, existingCluster("c", ns))).To(Succeed())
+		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+		reconcileOnce(r, "c", ns)
+		Expect(reasonFor("c", ns)).To(Equal("NamespaceNotAdmitted"))
+	})
+})
+
+// FIX 1: for an already-provisioned (Ready/Degraded) Existing-mode cluster, a
+// transient shared-Gateway blip must NOT flip CondExternalAccessReady to a
+// False reason. ensureExistingGateway runs before the reconcile flap guard
+// (#5/D4), so if it stamps a specific False reason directly on the CR, finish()
+// persists it and defeats D4's "leave last-known conditions intact" for exactly
+// the shared-Gateway-blip case. The not-yet-provisioned diagnostics (#6) must be
+// preserved — only the provisioned case is guarded.
+var _ = Describe("Existing-mode flap guard preserves ExternalAccessReady (FIX 1)", func() {
+	It("keeps a Ready cluster's ExternalAccessReady=True when the referenced Gateway momentarily loses its address", func() {
+		ctx := context.Background()
+		ns := "ex-flap"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, ns)
+
+		// Fully-valid, addressed, admits-all shared Gateway (Existing mode).
+		shared := sharedGatewayFixture(ns, []int32{14647, 24647, 34647})
+		Expect(k8s.Create(ctx, shared)).To(Succeed())
+		shared.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: "10.0.0.9"}}
+		Expect(k8s.Status().Update(ctx, shared)).To(Succeed())
+
+		nc := minimalCluster("prod", ns)
+		nc.Spec.ExternalAccess.Gateway.Mode = nomadv1alpha1.GatewayModeExisting
+		nc.Spec.ExternalAccess.Gateway.ClassName = ""
+		nc.Spec.ExternalAccess.Gateway.Ref = &nomadv1alpha1.GatewayRef{Name: "shared-gw", Namespace: ns}
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+
+		fake := &fakeNomad{leader: "10.0.0.9:14647", serverHealthy: true}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+
+		// The Gateway pre-exists with an address, so a single reconcile
+		// provisions, bootstraps (fake reports a leader), and reaches Ready.
+		reconcileOnce(r, "prod", ns)
+		var ready nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "prod", Namespace: ns}, &ready)).To(Succeed())
+		Expect(ready.Status.Phase).To(Equal(nomadv1alpha1.PhaseReady))
+		Expect(meta_IsStatusConditionTrue(ready.Status.Conditions, nomadv1alpha1.CondExternalAccessReady)).To(BeTrue())
+
+		// Transient blip: the referenced Gateway loses its address.
+		var gw gwapiv1.Gateway
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "shared-gw", Namespace: ns}, &gw)).To(Succeed())
+		gw.Status.Addresses = nil
+		Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
+		reconcileOnce(r, "prod", ns)
+
+		var got nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "prod", Namespace: ns}, &got)).To(Succeed())
+		Expect(got.Status.Phase).To(Equal(nomadv1alpha1.PhaseReady), "must not demote to Pending on a transient shared-Gateway blip")
+		Expect(meta_IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.CondExternalAccessReady)).To(
+			BeTrue(), "must not flip ExternalAccessReady to a False reason for a provisioned cluster")
+	})
 })

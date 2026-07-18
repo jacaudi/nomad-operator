@@ -150,10 +150,23 @@ func (r *NomadClusterReconciler) ensureGateway(ctx context.Context, nc *nomadv1a
 // than treating a misconfigured shared Gateway as a hard error.
 func (r *NomadClusterReconciler) ensureExistingGateway(ctx context.Context, nc *nomadv1alpha1.NomadCluster) (string, bool, error) {
 	ref := nc.Spec.ExternalAccess.Gateway.Ref
+	// For an already-provisioned cluster (Ready/Degraded), a transient shared-
+	// Gateway blip must NOT flip ExternalAccessReady to a False reason: this
+	// function runs before the reconcile flap guard (#5/D4), which keeps the
+	// last-known conditions intact and just requeues. Stamping a reason here
+	// would be persisted by finish() and defeat that guard. During provisioning
+	// (empty/Pending) the specific reason is #6's diagnostic value, so keep it.
+	provisioned := nc.Status.Phase == nomadv1alpha1.PhaseReady || nc.Status.Phase == nomadv1alpha1.PhaseDegraded
+	setNotReady := func(reason, msg string) {
+		if provisioned {
+			return
+		}
+		setCondition(nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionFalse, reason, msg)
+	}
 	var gw gwapiv1.Gateway
 	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: ref.Namespace}, &gw); err != nil {
 		if apierrors.IsNotFound(err) {
-			setCondition(nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionFalse, "GatewayNotFound",
+			setNotReady("GatewayNotFound",
 				fmt.Sprintf("referenced Gateway %s/%s not found", ref.Namespace, ref.Name))
 			return "", false, nil
 		}
@@ -173,24 +186,24 @@ func (r *NomadClusterReconciler) ensureExistingGateway(ctx context.Context, nc *
 	httpListener, ok := byName[listenerNameHTTP]
 	if !ok || httpListener.Protocol != gwapiv1.TLSProtocolType ||
 		httpListener.Hostname == nil || string(*httpListener.Hostname) != nc.Spec.ExternalAccess.Gateway.HTTPHostname {
-		setCondition(nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionFalse, "HTTPListenerInvalid",
+		setNotReady("HTTPListenerInvalid",
 			"referenced Gateway lacks a valid HTTPS/TLS listener for the configured hostname")
 		return "", false, nil
 	}
 	if !listenerAdmitsNamespace(httpListener, gw.Namespace, nc.Namespace) {
-		setCondition(nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionFalse, "NamespaceNotAdmitted",
+		setNotReady("NamespaceNotAdmitted",
 			"referenced Gateway HTTP listener does not admit namespace "+nc.Namespace)
 		return "", false, nil
 	}
 	for ordinal, p := range nc.Spec.ExternalAccess.Gateway.RPCPorts {
 		l, ok := byName[gwapiv1.SectionName(listenerNameRPC(ordinal))]
 		if !ok || l.Protocol != gwapiv1.TCPProtocolType || int32(l.Port) != p {
-			setCondition(nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionFalse, "RPCListenerInvalid",
+			setNotReady("RPCListenerInvalid",
 				fmt.Sprintf("referenced Gateway lacks a valid TCP listener for RPC port %d", p))
 			return "", false, nil
 		}
 		if !listenerAdmitsNamespace(l, gw.Namespace, nc.Namespace) {
-			setCondition(nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionFalse, "NamespaceNotAdmitted",
+			setNotReady("NamespaceNotAdmitted",
 				"referenced Gateway RPC listener does not admit namespace "+nc.Namespace)
 			return "", false, nil
 		}
@@ -200,7 +213,7 @@ func (r *NomadClusterReconciler) ensureExistingGateway(ctx context.Context, nc *
 			return a.Value, true, nil
 		}
 	}
-	setCondition(nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionFalse, "GatewayNoAddress",
+	setNotReady("GatewayNoAddress",
 		"referenced Gateway has no assigned address yet")
 	return "", false, nil
 }

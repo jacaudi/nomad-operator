@@ -173,6 +173,35 @@ aren't re-litigated as open issues.
 
 ---
 
+# Follow-ups
+
+Candidate improvements surfaced during the slice-6c whole-branch review. Not
+blocking, and not defects in the strict sense — recorded so they aren't lost.
+
+## Drain-parameter edit mid-drain is silently discarded (L-3 adopt-guard)
+
+- **Area:** reconciler / NomadNode drain lifecycle · **Found:** slice-6c whole-branch review
+- **Behavior:** the `NomadNode` adopt-guard fires on `stub.Drain == true` alone,
+  so editing `spec.Drain.Deadline` or `spec.Drain.IgnoreSystemJobs` while a node
+  is already mid-drain drops the new parameters — with no error, condition, or
+  event surfaced to the operator. (Re-issuing the drain with the new parameters
+  would instead restart the deadline, so both options are imperfect.)
+- **Candidate follow-up:** surface a condition/event when a changed drain-spec is
+  ignored because the node is already mid-drain, so the discard is at least
+  observable rather than silent.
+
+## Sanitize-collision stale-owner lockout (M-1)
+
+- **Area:** reconciler / NomadNode collision ownership · **Found:** slice-6c whole-branch review
+- **Behavior:** if the owning node disappears while a *different* colliding node
+  stays live, the CR keeps `Spec.NodeName` set to the dead owner and the live
+  collider skips forever — it never re-adopts the CR.
+- **Note:** this is a pre-existing shape, not worsened by 6c. `resolveCollisionOwners`
+  now has the data it needs to allow re-adoption in the existing-CR branch, so
+  permitting the live collider to take over a dead owner is a cheap follow-up.
+
+---
+
 # Feature Requests
 
 ## FR-1. Support a single-node (`servers: 1`) control plane
