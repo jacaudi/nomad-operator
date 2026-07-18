@@ -611,4 +611,71 @@ var _ = Describe("NomadNode reflector: prune + cascade", func() {
 			assertOwner()
 		}
 	})
+
+	It("re-adopts the CR to a live collider once the recorded owner disappears (M-2)", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-m2-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		// "web_1" and "web-1" both sanitize to "web-1"; lowest CreateIndex (web_1)
+		// owns the CR first.
+		fake := &fakeNodeOps{list: []*api.NodeListStub{
+			{ID: "a", Name: "web_1", Status: "ready", SchedulingEligibility: "eligible", CreateIndex: 10},
+			{ID: "b", Name: "web-1", Status: "ready", SchedulingEligibility: "eligible", CreateIndex: 20},
+		}}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		var nn nomadv1alpha1.NomadNode
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "web-1", Namespace: ns.Name}, &nn)).To(Succeed())
+		Expect(nn.Spec.NodeName).To(Equal("web_1"), "lowest CreateIndex owns first")
+
+		// The owner disappears from Nomad's list while the collider stays live.
+		fake.list = []*api.NodeListStub{
+			{ID: "b", Name: "web-1", Status: "ready", SchedulingEligibility: "eligible", CreateIndex: 20},
+		}
+		_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "web-1", Namespace: ns.Name}, &nn)).To(Succeed())
+		Expect(nn.Spec.NodeName).To(Equal("web-1"), "the live collider re-adopts the CR once the owner is gone")
+		Expect(nn.Status.NodeID).To(Equal("b"), "status now reflects the live collider")
+		Expect(meta.IsStatusConditionTrue(nn.Status.Conditions, nomadv1alpha1.NomadNodeCondReconciled)).To(BeTrue(),
+			"re-owned CR ends Reconciled=True, not stuck skipping forever")
+	})
+
+	It("re-adopts to the deterministic owner when two colliders survive the owner (M-2 no-flap)", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-m2nf-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		// "web_1", "web-1" and "web!1" all sanitize to "web-1". web_1 owns first.
+		fake := &fakeNodeOps{list: []*api.NodeListStub{
+			{ID: "a", Name: "web_1", Status: "ready", SchedulingEligibility: "eligible", CreateIndex: 10},
+			{ID: "b", Name: "web-1", Status: "ready", SchedulingEligibility: "eligible", CreateIndex: 20},
+		}}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Owner web_1 disappears; two colliders remain live (web-1 lowest CreateIndex).
+		fake.list = []*api.NodeListStub{
+			{ID: "b", Name: "web-1", Status: "ready", SchedulingEligibility: "eligible", CreateIndex: 20},
+			{ID: "c", Name: "web!1", Status: "ready", SchedulingEligibility: "eligible", CreateIndex: 30},
+		}
+		// Reconcile twice: the deterministic owner must be stable, never flapping
+		// between the two survivors.
+		for range 2 {
+			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+			Expect(err).NotTo(HaveOccurred())
+
+			var nn nomadv1alpha1.NomadNode
+			Expect(k8s.Get(ctx, types.NamespacedName{Name: "web-1", Namespace: ns.Name}, &nn)).To(Succeed())
+			Expect(nn.Spec.NodeName).To(Equal("web-1"), "lowest-CreateIndex survivor deterministically owns")
+			Expect(meta.IsStatusConditionTrue(nn.Status.Conditions, nomadv1alpha1.NomadNodeCondReconciled)).To(BeTrue())
+			// The other collider mints no CR of its own.
+			var list nomadv1alpha1.NomadNodeList
+			Expect(k8s.List(ctx, &list, client.InNamespace(ns.Name))).To(Succeed())
+			Expect(list.Items).To(HaveLen(1))
+		}
+	})
 })

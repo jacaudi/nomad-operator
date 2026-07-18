@@ -73,7 +73,7 @@ func (r *NomadNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// error is returned so genuinely-transient per-node failures still retry.
 	var errs []error
 	for _, stub := range bound {
-		if err := r.upsertNode(ctx, &nc, stub, owners, ops); err != nil {
+		if err := r.upsertNode(ctx, &nc, stub, bound, owners, ops); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -151,12 +151,43 @@ func resolveCollisionOwners(bound map[string]*api.NodeListStub) map[string]strin
 // upsertNode creates-or-updates the NomadNode for one bound stub: sanitized
 // metadata.name, ownerRef to the cluster, spec seeded ONCE at create, status
 // mirrored every pass, then desired state driven onto Nomad.
-func (r *NomadNodeReconciler) upsertNode(ctx context.Context, nc *nomadv1alpha1.NomadCluster, stub *api.NodeListStub, owners map[string]string, ops NomadNodeOps) error {
+func (r *NomadNodeReconciler) upsertNode(ctx context.Context, nc *nomadv1alpha1.NomadCluster, stub *api.NodeListStub, bound map[string]*api.NodeListStub, owners map[string]string, ops NomadNodeOps) error {
 	objName := sanitizeNodeName(stub.Name)
 	var nn nomadv1alpha1.NomadNode
 	err := r.Get(ctx, types.NamespacedName{Name: objName, Namespace: nc.Namespace}, &nn)
-	switch {
-	case apierrors.IsNotFound(err):
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	mint := apierrors.IsNotFound(err)
+
+	// An existing CR is owned by its Spec.NodeName; a different colliding node
+	// must not hijack it or clobber its status — skip deterministically (M-1).
+	// Exception (M-2): re-adopt the CR when its recorded owner has disappeared
+	// this pass AND this stub is now the deterministic owner. Guarding on both
+	// keeps a genuine live collision (recorded owner still present) skipping the
+	// loser, and — when the owner is gone but two colliders survive — lets only
+	// the deterministic owner re-own, so ownership never flaps.
+	if !mint && nn.Spec.NodeName != stub.Name {
+		_, ownerLive := bound[nn.Spec.NodeName]
+		if ownerLive || owners[objName] != stub.Name {
+			log.FromContext(ctx).Info("skipping node whose sanitized name collides with an existing owner",
+				"node", stub.Name, "object", objName, "owner", nn.Spec.NodeName)
+			return nil
+		}
+		// Recorded owner is gone; re-adopt the object to this live owner. NodeName
+		// is immutable (CRD CEL rule), so the identity cannot be rewritten in place:
+		// delete the stale CR and re-mint it under the live owner (same object
+		// name). NomadNode carries no finalizer, so the delete is synchronous.
+		log.FromContext(ctx).Info("re-adopting node whose recorded owner has disappeared",
+			"node", stub.Name, "object", objName, "formerOwner", nn.Spec.NodeName)
+		if err := r.Delete(ctx, &nn); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		nn = nomadv1alpha1.NomadNode{}
+		mint = true
+	}
+
+	if mint {
 		// Only the deterministic owner mints the CR; a colliding loser skips so
 		// ownership never flaps with map-iteration order (M-1).
 		if owners[objName] != stub.Name {
@@ -188,16 +219,8 @@ func (r *NomadNodeReconciler) upsertNode(ctx context.Context, nc *nomadv1alpha1.
 				return err
 			}
 		}
-	case err != nil:
-		return err
 	}
-	// An existing CR is owned by its Spec.NodeName; a different colliding node
-	// must not hijack it or clobber its status — skip deterministically (M-1).
-	if nn.Spec.NodeName != stub.Name {
-		log.FromContext(ctx).Info("skipping node whose sanitized name collides with an existing owner",
-			"node", stub.Name, "object", objName, "owner", nn.Spec.NodeName)
-		return nil
-	}
+
 	// Drive desired state onto Nomad (Task 7 fills driveDesired), then mirror.
 	if err := r.driveDesired(ctx, &nn, stub, ops); err != nil {
 		return err
