@@ -9,13 +9,17 @@ This is slice **6c** of the hardening slice (6a = `NomadNamespace`, done+merged;
 
 ## Grounding
 
-Every item below was re-verified against current `main` (HEAD `e429a01`), not taken from memory:
+Every item below was re-verified against current `main` (design committed at `5104f66`; code HEAD `e429a01`), not taken from memory — **except #7, whose grounding was stale and is corrected in the amendment (already implemented)**:
 
 - The **slice-2 backlog** is the durable, authoritative record in `docs/known-issues.md` (#1 already Resolved by 6b; FR-1 servers:1 already shipped; #2–#7 remain).
 - The **slice-3 Minors + test gaps** and the **6a deferrals** lived only in worktree ledgers (now gone); each was re-grounded against current code via a read-only inventory pass, which produced the `file:line` anchors and current-behavior notes cited throughout. Two findings changed the triage: **L-2** is currently *intended, test-asserted* behavior (not a plain bug), and the **6a finalize reserved-guard is a phantom** (no such guard exists in the finalize path).
 - The **6b Minors** are recorded in `docs/designs/2026-07-17-nomadcluster-restart-resilience-design.md` and the slice-6b whole-branch review.
 
-User scope decisions folded in (2026-07-17): (a) **comprehensive close-out** — every item to terminal state; (b) 6b Minor 2 → **root-cause fix** (persist `ExternalAddress`), not a dedup marker; (c) the three borderline items **L-2, #6, #7 are all fixed in 6c**, not deferred as documented enhancements.
+User scope decisions folded in (2026-07-17): (a) **comprehensive close-out** — every item to terminal state; (b) 6b Minor 2 → **root-cause fix** (persist `ExternalAddress`), not a dedup marker; (c) the three borderline items **L-2, #6, #7 were all to be fixed in 6c** — but see the amendment: **#7 was already implemented on `main`**, so it collapses to a Resolved disposition.
+
+**6b Minor enumeration (M-1, no silent drop):** the slice-6b whole-branch review raised **3** Minors. **Minor 1** (a `checkAddressDrift` comment wrongly saying "Normal severity" for the servers:1-non-Ready case) was **already fixed in 6b** (`e429a01`). **Minor 2** → Group E below. **Minor 3** → Group F below. All three accounted for.
+
+> **Amended 2026-07-17** after an independent `sr-go-engineer` *design* review (Fable model), verdict *amend-before-planning* — no BLOCK. Verified SOUND and not re-litigated (per the reviewer): the C1/C2/C3 anchors + fixes; C4's guard mechanics; **E's `ExternalAddress` audit — the reviewer grep-audited every reference and confirmed the only functional consumer is the drift guard's own `prevAddr` at `:125`, so the root-cause early-persist fix is clean**; F1 (6b Minor 3 keep-prior), F2 (**the 6a finalize-guard *is* a phantom — no reserved-name check exists in `finalizeNamespace`**), F3 (6a conflict-then-delete parity); D2/D3/6a-nit; and the no-CRD-schema-change claim. Folded corrections: **C-1 (Critical)** — **#7 is already implemented on current `main`** (`fbbf66e`, an ancestor of HEAD: `Watches(&gwapiv1.Gateway{}, r.gatewayToClusters)` at `nomadcluster_controller.go:293`, mapping at `:249-267`, `gatewaywatch_test.go`); #7 is therefore **dropped from fix scope** → mark `known-issues.md` #7 **Resolved** (cite `fbbf66e`), with an *optional* wired-watch envtest as the only residual value; the §8 sequencing rationale is corrected accordingly. **I-1 (Important)** — #6 cannot "thread a reason through the `(string,bool,error)` tuple" without rippling into the LB/Managed paths that share it; #6 is re-specified to **localize** the reason to the Existing path. **I-2 (Important)** — D4 now specifies the full coherent target state (not just the Phase label). **I-3 (Important)** — C4's scale-to-zero retention consequence is now recorded as explicitly-accepted. **M-2 (Minor)** — stale anchors refreshed (`ExternalAccess.Gateway.RPCPorts`; HEAD `5104f66`).
 
 ---
 
@@ -68,7 +72,8 @@ All confirmed **still present** on current `main`. Each is a localized reconcile
 - **Current behavior:** an empty-but-error-free `ListNodes` yields empty `bound`/`dupes`, so `pruneAbsent` **deletes every one of the cluster's NomadNode CRs**. There is no guard. This is presently *intended*: `_test.go:229-247` asserts an empty list prunes.
 - **Why fix it anyway:** a spurious empty result (transient API glitch returning `[], nil`) would mass-delete real CRs — an all-or-nothing data-loss edge disproportionate to the benefit of promptly pruning a genuinely-empty cluster.
 - **Fix (KISS, stateless):** guard only the all-or-nothing wipe — when `ListNodes` returns empty/`nil`-error **and** there are currently `> 0` owned NomadNode CRs, **skip** the prune for this pass and log a warning (treat a sudden full-empty as suspect). A genuinely-zero-client cluster keeps a few stale-but-harmless CRs until a node reappears — strictly preferable to a spurious mass-delete. Per-node pruning of *some* absent nodes (a non-empty list missing entries) is unchanged.
-- **Test impact:** `_test.go:229-247` is **updated** to assert the new guard (empty list + existing CRs → no prune + warning), plus a companion asserting a non-empty list still prunes its absent entries. This is a deliberate, documented semantics change, not an accidental one.
+- **Accepted consequence (I-3), recorded not silently dropped:** the guard is stateless, so a cluster that **legitimately** runs at zero clients never prunes — its NomadNode CRs persist showing their last-mirrored (e.g. `ready`) status until a real node reappears (non-empty list → normal per-node prune) or the cluster is deleted (ownerRef GC removes them). This is bounded and deliberate (avoiding a spurious mass-delete outweighs promptly pruning a genuinely-empty cluster), but it **is** a semantics change and must be recorded as accepted behavior in both the test and a `known-issues.md` note — otherwise it is exactly the silent drop this slice exists to prevent.
+- **Test impact:** `_test.go:229-247` is **updated** to assert the new guard (empty list + existing CRs → no prune + warning), plus a companion asserting a non-empty list still prunes its absent entries, and a comment recording the scale-to-zero retention as intended. This is a deliberate, documented semantics change, not an accidental one.
 
 ---
 
@@ -76,30 +81,30 @@ All confirmed **still present** on current `main`. Each is a localized reconcile
 
 Small, mostly mechanical. #1 is already Resolved (6b); FR-1 shipped. **D1–D3 + the 6a nit batch into one "cleanup" task** (each is ≤ a few lines, no behavior change); **D4 is its own task** (a real robustness fix with its own tests).
 
-- **D1 (#2) lint** — preallocate `listeners` with capacity `1 + len(nc.Spec.Gateway.RPCPorts)` (`resources_gateway.go:30`, `prealloc`); drop/use the always-`"nomad-tls"` `name` param of `makeCertSecret` (`security_test.go:58`, `unparam`). No behavior change.
+- **D1 (#2) lint** — preallocate `listeners` with capacity `1 + len(nc.Spec.ExternalAccess.Gateway.RPCPorts)` (`resources_gateway.go`, `prealloc`; note the spec path is `ExternalAccess.Gateway.RPCPorts` — `resources_gateway.go:37` — not the pre-external-access `Gateway.RPCPorts` that `known-issues.md` #2 still names); drop/use the always-`"nomad-tls"` `name` param of `makeCertSecret` (`security_test.go:58`, `unparam`). No behavior change.
 - **D2 (#3) trim unused `NomadOps` methods** — remove `Ping`, `ServerHealthy` from the `NomadOps` interface (`nomadcluster_controller.go:~42-44`); they are never called by the reconciler. **Keep the concrete `(*nomad.Client).ServerHealthy`** — it backs the `(*api.Agent).Health` `contract.go` pin via a real call. Only the interface surface is trimmed.
 - **D3 (#4) remove redundant gossip mount** — the `gossip` Secret is mounted read-only at `/nomad/gossip` on the **main** container (`resources_workload.go:~212`), but the encrypt key is baked into `overlay.hcl` by the **init** container; the main container never reads it. Remove it from the main container (keep it on the init container); add/confirm a builder test that the main container has no `/nomad/gossip` mount.
 - **6a nit** — `CountNamespaceJobs` (`internal/nomad/namespace.go:44`) inlines `(&api.QueryOptions{Namespace: name}).WithContext(ctx)` instead of the existing `nsQueryOpts` helper (`client.go:64`); `UpsertNamespace`/`DeleteNamespace` (`namespace.go:24,33`) inline `(&api.WriteOptions{}).WithContext(ctx)`. Call `nsQueryOpts`; optionally add a plain `writeOpts` helper and reuse it. DRY tidy, no behavior change.
 
-- **D4 (#5) Ready/Degraded → Pending flap guard** *(real robustness fix, own task + tests)* — the cert gate (`nomadcluster_controller.go:~92-96`) and gateway gate (`~103-107`) set `Phase = Pending` and return early if the cert Secret or gateway address read momentarily fails, **even for an already-`Ready`/`Degraded` cluster** (in Existing mode a shared-Gateway blip could flap a healthy cluster). **Fix:** don't demote a provisioned cluster on a transient dependency blip — only gate to `Pending` when phase is empty/`Pending` (mirroring the Bootstrapping-seed guard added for the Ready→Degraded fix), distinguishing "never provisioned" from "provisioned, transient blip." Envtest: drive to `Ready`, then a transient cert/gateway read error asserts the phase stays `Ready`/`Degraded`, not `Pending`.
+- **D4 (#5) Ready/Degraded → Pending flap guard** *(real robustness fix, own task + tests)* — the cert gate (`nomadcluster_controller.go:102-106`) and gateway gate (`:120-124`) set `Phase = Pending`, set `CondReady`/`CondExternalAccessReady = False`, and early-return via `finish(...requeueShort)` if the cert Secret or gateway address read momentarily fails, **even for an already-`Ready`/`Degraded` cluster** (in Existing mode a shared-Gateway blip could flap a healthy cluster).
+  - **Full target state (I-2 — specify all of it, not just the Phase label), for BOTH gates:** when the cluster is already provisioned (`Phase == Ready` or `Degraded`) and a dependency read *transiently* fails: **(1)** keep the existing `Phase` (do **not** demote to `Pending`); **(2)** do **not** flip `CondReady`/`CondExternalAccessReady` to `False` — leave the last-known conditions intact (a transient read blip is not a health change of the running cluster, unlike the genuine `Degraded`+`Ready=False` "QuorumLost" state at `:208-212`, which stays as-is); **(3)** still **early-return with `RequeueAfter: requeueShort`** — never proceed to `apply` with a failed dependency read. For a **never-provisioned** cluster (`Phase` empty/`Pending`), behavior is **unchanged** (gate to `Pending` + condition `False`, as today). This avoids the incoherent `Phase=Ready` + `Ready=False` + apply-skipped half-demotion the reviewer flagged.
+  - **Envtest:** drive to `Ready`, then a transient cert/gateway read error asserts `Phase` stays `Ready` **and** `CondReady` stays `True` **and** no `apply` ran (still requeued); a `Phase==""`/`Pending` cluster with the same error asserts the unchanged gate-to-`Pending` behavior.
 
 ---
 
-## 5. Group G — Existing-mode Gateway hardening (`known-issues.md` #6, #7)
+## 5. Group G — Existing-mode Gateway hardening (`known-issues.md` #6; #7 already Resolved)
 
-Both touch Existing-mode gateway handling (`ensureExistingGateway` in `resources_gateway.go` + the gateway gate in `nomadcluster_controller.go`). They are cohesive and share a signature, so they're grouped. **#6 lands first** — it changes the `ensureGateway`/`ensureExistingGateway` signature that #7's reconcile-trigger builds on, so doing #7 first would churn.
+The only remaining *fix* here is **#6**. **#7 was already implemented on `main`** and collapses to a docs disposition (C-1, below).
 
 ### #6 — typed `ExternalAccessReady` reason
-- **Where:** gateway gate condition `nomadcluster_controller.go:~105` + `ensureExistingGateway` (`resources_gateway.go`).
-- **Current behavior:** all Existing-mode verification failures (Gateway not found, missing/misnamed listener, namespace not admitted, no address yet) collapse into one generic `ExternalAccessReady=False` / `"WaitingForAddress"` reason. Operators can't tell which prerequisite failed from status alone.
-- **Fix:** return a typed verification result (reason enum + message) from `ensureExistingGateway` — thread it through the current `(string, bool, error)` signature — and surface the specific reason in the `ExternalAccessReady` condition. Managed mode unaffected.
-- **Tests:** envtest per failure mode (missing Gateway / bad listener / not-admitted / no-address) asserting the distinct reason.
+- **Where:** the generic condition is set in `Reconcile` on the not-ready path (`nomadcluster_controller.go:122`) and success (`:127`); the Existing-mode verification lives in `ensureExistingGateway` (`resources_gateway.go:150`).
+- **Current behavior:** all Existing-mode verification failures (Gateway not found, missing/misnamed listener, namespace not admitted, no address yet) collapse into one generic `ExternalAccessReady=False` / `"WaitingForAddress"` reason (set uniformly at `:122` for every mode). Operators can't tell which prerequisite failed from status alone.
+- **Fix (I-1 — localized, does NOT reshape the shared tuple):** `ensureExistingGateway`, `ensureManagedGateway`, `ensureGateway`, and `ensureLoadBalancer` **all** return `(string, bool, error)` and the `Reconcile` switch (`:111-116`) assigns them uniformly — so **do not** add a reason to that tuple (it would ripple into the LB/Managed paths and break "Managed unaffected"). Instead, keep the shared 3-tuple untouched and **localize the reason to the Existing path**: have `ensureExistingGateway` set `CondExternalAccessReady` (with the specific per-failure reason) directly on `nc` — it already receives `nc` — so the Existing-specific reason supersedes the generic `:122` set only on that branch. The LB and Managed paths keep the generic reason unchanged. (No CRD impact: condition reasons are free-form status strings and the reason enum is Go consts.)
+- **Tests:** envtest per Existing-mode failure mode (missing Gateway / bad listener / not-admitted / no-address) asserting the distinct reason; LB/Managed paths assert the generic reason is unchanged.
 
-### #7 — watch the referenced Gateway (Existing mode)
-- **Where:** `SetupWithManager` watch set (`nomadcluster_controller.go`) + `ensureExistingGateway` (`resources_gateway.go`).
-- **Current behavior:** in `mode: Existing`, the operator reads the referenced Gateway's `status.addresses` but sets up **no Watch** on it. If the Gateway's address is assigned/changed *after* the operator's reconcile, the operator won't react until periodic resync or the next NomadCluster change — the cluster sits at `Pending`/stale `externalAddress` longer than necessary (observed directly: patching `status.addresses` did not trigger a reconcile). Managed mode is fine (owned + watched via ownerRef).
-- **Fix:** add a `Watches` on `gatewayapi.Gateway` in `SetupWithManager` with a mapping func that resolves a Gateway back to the owning NomadCluster(s) that reference it in Existing mode (enqueue those). Managed mode unaffected.
-- **Tests:** envtest asserting a Gateway `status.addresses` change enqueues a reconcile for the referencing NomadCluster; a Gateway referenced by nobody enqueues nothing.
+### #7 — watch the referenced Gateway (Existing mode) — **RESOLVED (C-1), no fix work**
+- **Status:** already implemented on current `main` by `fbbf66e` ("fix(controller): watch referenced Gateway + own applied children"), an ancestor of the code HEAD: `Watches(&gwapiv1.Gateway{}, handler.EnqueueRequestsFromMapFunc(r.gatewayToClusters))` (`nomadcluster_controller.go:293`), the `gatewayToClusters` mapping resolving a Gateway → Existing-mode referencing NomadClusters with Managed excluded (`:249-267`), and unit coverage in `gatewaywatch_test.go`. My original grounding for #7 was **stale** — the review caught it.
+- **Disposition:** mark `docs/known-issues.md` #7 **Resolved** (cite `fbbf66e`) as part of the Group F/docs task. **Optional residual (only added value):** an envtest that asserts end-to-end enqueue through the wired manager (the existing test is a unit test of the map func, not a wired-watch envtest). Include it if cheap; it is not required for terminal disposition.
 
 ---
 
@@ -132,9 +137,9 @@ One implementation plan, executed via the subagent-driven-development bundle (wo
 3. **C1 (M-1)**, **C3 (L-3)**, **C4 (L-2)** — the remaining slice-3 fixes; **B2**, **B3** test gaps alongside their subjects.
 4. **D-cleanup** (D1 + D2 + D3 + 6a nit) — one batched cleanup task.
 5. **D4 (#5)** flap guard.
-6. **G: #6** typed reason → **#7** Gateway watch (in this order — shared signature).
-7. **E (6b Minor 2)** persist `ExternalAddress` (with the semantics audit).
-8. **F + docs** — `known-issues.md` won't-fix rationales; close #2–#7 entries that were fixed; record the A1 evidence; correct/annotate resolved entries.
+6. **G: #6** typed reason (localized to the Existing path — I-1). *(#7 is already Resolved on `main` — no fix task; it becomes a known-issues close in step 8, plus an optional wired-watch envtest.)*
+7. **E (6b Minor 2)** persist `ExternalAddress` (with the semantics audit — the reviewer's audit already confirms it clean).
+8. **F + docs** — `known-issues.md` won't-fix rationales (F1/F2/F3); mark #2–#6 **Resolved** as they land and #7 **Resolved** (cite `fbbf66e`); record the A1 evidence; correct/annotate resolved entries.
 9. **A1 re-run** — final green gate.
 
 Batching intent (from KISS): the trivial cleanups are **one** task, not one-per-nit; the won't-fix items are **one** docs task. Everything else is a discrete TDD task so per-task review stays meaningful.
@@ -149,7 +154,7 @@ The build/regen gate for every code task: `make manifests generate fmt vet && ma
 - **Group B:** three new unit/envtest cases in `nomadnode_controller_test.go` (B1 against the C2 persisted path).
 - **Group C:** TDD per fix; C4 **updates** `_test.go:229-247` (documented semantics change) and adds a companion.
 - **Group D:** D1–D3 covered by existing build/lint + a new builder assertion for D3; D4 gets dedicated flap envtests.
-- **Group G:** #6 per-failure-reason envtests; #7 a watch-enqueue envtest.
+- **Group G:** #6 per-failure-reason envtests (+ LB/Managed generic-reason unchanged); #7 needs no fix (already on `main`) — an optional wired-watch enqueue envtest only.
 - **Group E:** a two-reconcile drift+error envtest asserting single-fire.
 - **No regression** to the existing slice-2/3/4/5/6a/6b reconcile, gateway, loadbalancer, teardown, pool, job, namespace suites; coverage should not drop materially from current (`controller ~78%`, `nomad ~74%`).
 
@@ -157,7 +162,7 @@ The build/regen gate for every code task: `make manifests generate fmt vet && ma
 
 ## 10. What 6c deliberately does **not** do
 
-- **No new CRDs, no new spec surface, no new features.** Everything is a fix, a test, a cleanup, or a doc. (#6/#7 harden an existing mode; they add a reason enum and a watch, not a new API.)
+- **No new CRDs, no new spec surface, no new features.** Everything is a fix, a test, a cleanup, or a doc. (#6 hardens an existing mode by localizing a reason enum, not a new API; #7's watch already shipped.)
 - **No networking/advertise/topology change** (that was 6b's domain and is explicitly frozen).
 - **No auto-recovery, no `servers:1` behavior change** — 6b's rejections stand.
 - **No parity-breaking change to `NomadNamespace`** (the 6a conflict-then-delete window is left mirroring `NomadPool`).
@@ -167,7 +172,7 @@ The build/regen gate for every code task: `make manifests generate fmt vet && ma
 
 ## 11. The go-public gate
 
-The pinned project decision is that the repository stays **local-only until the deferred backlog is cleared** — no push, no remote, no repo creation until then. 6c is the slice that clears it: on completion, every backlog item is fixed, tested, or documented-won't-fix, and `docs/known-issues.md` reflects reality (resolved entries closed, won't-fix entries carrying rationale, #6/#7 fixed).
+The pinned project decision is that the repository stays **local-only until the deferred backlog is cleared** — no push, no remote, no repo creation until then. 6c is the slice that clears it: on completion, every backlog item is fixed, tested, or documented-won't-fix, and `docs/known-issues.md` reflects reality (resolved entries closed, won't-fix entries carrying rationale, #6 fixed and #7 marked resolved).
 
 At that point the gate is satisfied — but publishing is still an **explicit, separate decision the user makes**, not an automatic consequence of merging 6c. This design does not authorize any outward-facing action. When the user chooses to publish, the remaining known-issues entries (if any are consciously kept as enhancements) become filed GitHub issues verbatim, as their preamble intends.
 
@@ -177,4 +182,4 @@ At that point the gate is satisfied — but publishing is still an **explicit, s
 
 - **6a — `NomadNamespace`** ✅ done + merged (local `main`).
 - **6b — restart resilience** ✅ done + merged (local `main`).
-- **6c — hardening & backlog close-out** ← *this design*: A live-integration run · B slice-3 test gaps · C slice-3 Minors (incl. L-2 guard) · D slice-2 cleanup + flap guard + 6a nit · G Existing-mode Gateway (#6 typed reason, #7 watch) · E 6b Minor 2 persist-`ExternalAddress` · F documented won't-fix (6b Minor 3, 6a finalize-phantom, 6a conflict-then-delete parity). Terminal state = the deferred backlog is cleared and the go-public gate (§11) is satisfied.
+- **6c — hardening & backlog close-out** ← *this design*: A live-integration run · B slice-3 test gaps · C slice-3 Minors (incl. L-2 guard) · D slice-2 cleanup + flap guard + 6a nit · G Existing-mode Gateway (#6 typed reason; **#7 already Resolved on `main`** — `fbbf66e`) · E 6b Minor 2 persist-`ExternalAddress` · F documented won't-fix (6b Minor 3, 6a finalize-phantom, 6a conflict-then-delete parity). Terminal state = the deferred backlog is cleared and the go-public gate (§11) is satisfied.
