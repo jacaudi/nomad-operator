@@ -2,7 +2,23 @@
 
 - **Severity:** Minor · **Area:** reconciler / NomadNode sanitize-collision ownership
 - **Source:** slice-6c whole-branch review (2026-07-18), finding M-2; related to the slice-6c M-1 deterministic-owner fix.
-- **Status:** Open (follow-up). Pre-existing *shape* — not introduced or worsened by slice 6c.
+- **Status:** RESOLVED — 2026-07-18, commit `a5ae423`, merged fast-forward to local `main` (HEAD `6ed9384`).
+
+## Resolution
+
+The existing-CR branch of `upsertNode` now re-adopts the CR when the recorded
+owner (`nn.Spec.NodeName`) is absent from the live `bound` set **and**
+`resolveCollisionOwners` names this live stub the deterministic owner; a genuine
+both-present collision still deterministically skips the loser (no flap).
+**Mechanism note:** `spec.nodeName` is immutable via a CRD CEL rule
+(`self.nodeName == oldSelf.nodeName`), so the identity cannot be rewritten in
+place — re-adoption instead **deletes the stale CR and re-mints it** under the
+live owner (same object name; NomadNode has no finalizer, so the delete is
+synchronous). `Eligible`/`Drain` are reseeded from the live node (correct — the
+CR now backs a different physical node, so stale intent for the dead node must
+not carry over). envtest coverage: owner-disappears→re-own; two survivors→
+deterministic single owner. Independent whole-branch review confirmed Acceptance
+met.
 
 ## Problem
 

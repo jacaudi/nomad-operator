@@ -2,7 +2,19 @@
 
 - **Severity:** Minor · **Area:** reconciler / NomadNode drain convergence
 - **Source:** slice-6c whole-branch review (2026-07-18), finding M-1; originates from the slice-6c L-3 adopt-guard.
-- **Status:** Open (follow-up)
+- **Status:** RESOLVED — 2026-07-18, commit `d8925c3` (revert-clearing test `b330137`), merged fast-forward to local `main` (HEAD `6ed9384`).
+
+## Resolution
+
+`driveDesired`'s adopt-guard now compares the desired `DrainSpec` (deadline /
+ignoreSystemJobs) against Nomad's live `DrainStrategy` and, on divergence, sets a
+**`DrainSpecPendingRestart`** Condition on the NomadNode (reason `DrainSpecEdited`;
+cleared to `DrainSpecInSync` when the edit is reverted). The drain is **not**
+re-issued — the L-3 deadline-preservation behavior is deliberately kept. A status
+**Condition** was chosen over an Event so the NomadNode reconciler stays
+recorder-free (decoupling it from the SA1019 recorder cleanup). envtest coverage:
+edit-diverges→True, spec-matches-live→no-fire, revert→True→False. Independent
+whole-branch review confirmed Acceptance met.
 
 ## Problem
 

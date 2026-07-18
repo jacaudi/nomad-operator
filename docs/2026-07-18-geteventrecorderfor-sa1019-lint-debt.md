@@ -2,7 +2,24 @@
 
 - **Severity:** Minor · **Area:** lint / cleanup
 - **Source:** slice-6c whole-branch review + Task 8 (2026-07-18). Pre-existing; not introduced by slice 6c.
-- **Status:** Open (follow-up / lint-debt)
+- **Status:** RESOLVED — 2026-07-18, commit `97095bc`, merged fast-forward to local `main` (HEAD `6ed9384`).
+
+## Resolution
+
+**Confirmed genuine:** controller-runtime v0.23.3 `pkg/recorder/recorder.go:32`
+carries a real `// Deprecated:` marker on `GetEventRecorderFor`, naming
+`GetEventRecorder` as the replacement. **But** `GetEventRecorder` returns
+`events.EventRecorder` (the new events API), which is type-incompatible with the
+`Recorder record.EventRecorder` field on all four reconcilers — migrating would
+change the field type and rewrite every `.Event()` call, violating "field type
+unaffected / events fire identically." Per this issue's Acceptance suppression
+branch, applied a narrowly-scoped `//nolint:staticcheck` at all four
+`SetupWithManager` sites (matching controller-runtime's own internal handling at
+`pkg/manager/internal.go:264`; the fourth site, nomadpool, was hidden by
+golangci-lint's default `max-same-issues:3`). `make lint` now reports **zero**
+SA1019; events fire identically. The real migration to the `events.EventRecorder`
+API is deferred behavioral work, tracked in
+`docs/2026-07-18-events-eventrecorder-api-migration.md`.
 
 ## Problem
 
