@@ -140,6 +140,14 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	nc.Status.ExternalAddress = extAddr
 	setCondition(&nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionTrue, "Assigned", "external address assigned")
 	r.checkAddressDrift(&nc, prevAddr, extAddr)
+	// Persist the resolved address + drift condition NOW, before the error-prone
+	// provisioning applies below. Otherwise an apply/client error returns before
+	// finish() persists, prevAddr never advances, and the next reconcile re-detects
+	// the same drift and re-emits the Warning every pass (6b Minor 2). ExternalAddress
+	// has no "last-successfully-applied" consumer (reviewer-audited), so this is safe.
+	if err := r.Status().Update(ctx, &nc); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// 3. Render config + provision workloads.
 	_, configHash := renderConfig(&nc, extAddr)

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -12,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
@@ -439,6 +441,54 @@ var _ = Describe("advertise.rpc drift guard", func() {
 		Expect(ev).To(ContainSubstring("self-heal"))
 	})
 })
+
+var _ = Describe("drift Warning does not re-fire during an apply-error window (6b Minor 2)", func() {
+	It("emits the servers:1 drift Warning only once across a persistent apply error", func() {
+		ctx := context.Background()
+		r, rec := driveToReady(ctx, "efire", "e-fire", "10.0.0.5", 1, []int32{14647})
+
+		// Wrap the reconciler's client so every ConfigMap apply fails — simulating
+		// a persistent apply-error window concurrent with a drift.
+		r.Client = &configMapApplyFails{Client: r.Client}
+
+		drift := func() {
+			var gw gwapiv1.Gateway
+			Expect(k8s.Get(ctx, types.NamespacedName{Name: "efire-gateway", Namespace: "e-fire"}, &gw)).To(Succeed())
+			gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: "10.0.0.9"}}
+			Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
+			_, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "efire", Namespace: "e-fire"}})
+		}
+		drift() // reconcile 1: address 10.0.0.5 -> 10.0.0.9, apply fails after persist
+		drift() // reconcile 2: address already 10.0.0.9 persisted -> no new drift
+
+		// Exactly one Warning across both reconciles.
+		warnings := 0
+		for {
+			select {
+			case ev := <-rec.Events:
+				if strings.Contains(ev, "Warning") {
+					warnings++
+				}
+				continue
+			default:
+			}
+			break
+		}
+		Expect(warnings).To(Equal(1), "drift Warning must fire once, not per-reconcile, during an apply-error window")
+	})
+})
+
+// configMapApplyFails fails every write to a ConfigMap; all other calls pass through.
+type configMapApplyFails struct {
+	client.Client
+}
+
+func (c *configMapApplyFails) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	if _, ok := obj.(*corev1.ConfigMap); ok {
+		return errors.New("simulated ConfigMap apply failure")
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
 
 var _ = Describe("transient-read flap guard (#5)", func() {
 	It("keeps a Ready cluster Ready when the gateway address momentarily disappears", func() {
