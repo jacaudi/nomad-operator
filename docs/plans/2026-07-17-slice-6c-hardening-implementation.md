@@ -19,6 +19,8 @@
 
 **Tech Stack:** Go 1.26, controller-runtime v0.23.3, kubebuilder v4, k8s v0.35.0, HashiCorp Nomad `api` pinned `v0.0.0-20260707172059-5b83b133998a` (== v2.0.4). Tests: Ginkgo v2 + Gomega on envtest.
 
+> **Amended 2026-07-17** after an independent `sr-go-engineer` plan review (Fable), verdict *amend-before-execution* (no BLOCK). All production fixes and RED claims verified sound against `main`. Folded three compile-blocking test-snippet corrections: **T9/T11** — `driveToReady`/`driftTo` were local closures inside the drift-guard `Describe`, now hoisted to package scope (T9 Step 1); **T10** — the Existing-mode `Ref` type is `*GatewayRef` (pointer), not `GatewayReference`; **T8/D3** — `resources_workload_test.go` is a plain `testing.T` file, so the gossip-mount test is a `func TestGossipMountedOnlyOnInitContainer(t *testing.T)`, not a bare Ginkgo `It`. Hard-coded the two confirm-then-write facts: `r.apply` = SSA `Patch` on the ConfigMap first (T11 wrapper correct); `certSecretReady` returns `(false, nil)` on an incomplete Secret (T9 trigger correct). Minors: `for range 2`, explicit `client` import.
+
 ## Global Constraints
 
 - **Package layout:** controller code is `package controller`; Nomad client code is `package nomad`; API types are `package v1alpha1`. Tests are **white-box** (same package as the code under test).
@@ -335,7 +337,7 @@ Add under `Describe("NomadNode reflector: prune + cascade", ...)` (or a new driv
 		}
 
 		// Run twice; ownership + condition must be stable across passes.
-		for i := 0; i < 2; i++ {
+		for range 2 {
 			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
 			Expect(err).NotTo(HaveOccurred())
 			assertOwner()
@@ -343,7 +345,7 @@ Add under `Describe("NomadNode reflector: prune + cascade", ...)` (or a new driv
 	})
 ```
 
-(Add `"k8s.io/apimachinery/pkg/api/meta"` and `"sigs.k8s.io/controller-runtime/pkg/client"` to the test imports if not already present — `meta` is already imported per the file header.)
+(Add `"sigs.k8s.io/controller-runtime/pkg/client"` to the test imports — `meta` (`k8s.io/apimachinery/pkg/api/meta`, providing `meta.IsStatusConditionTrue`) is already imported per the file header; `client` is not.)
 
 - [ ] **Step 2: Run it — verify RED**
 
@@ -734,28 +736,32 @@ Leave the concrete `(*nomad.Client).Ping`/`ServerHealthy` methods and their `con
 
 - [ ] **Step 4: D3 — remove the redundant gossip mount, write the failing test first**
 
-Add to `resources_workload_test.go` (create the file if absent, following the builder-test pattern — build a StatefulSet and inspect containers):
+`resources_workload_test.go` is a **plain `testing.T`** file (not Ginkgo), so write a stdlib test matching that file's pattern (NOT a bare `It(...)`, which fails Ginkgo tree construction):
 
 ```go
-	It("does not mount the gossip Secret on the main nomad container (only the init container)", func() {
-		nc := minimalCluster("prod", "wl")
-		sts := buildStatefulSet(nc, "hash")
-		main := sts.Spec.Template.Spec.Containers[0]
-		for _, m := range main.VolumeMounts {
-			Expect(m.MountPath).NotTo(Equal("/nomad/gossip"), "main container must not mount gossip")
+func TestGossipMountedOnlyOnInitContainer(t *testing.T) {
+	nc := minimalCluster("prod", "wl")
+	sts := buildStatefulSet(nc, "hash")
+	main := sts.Spec.Template.Spec.Containers[0]
+	for _, m := range main.VolumeMounts {
+		if m.MountPath == "/nomad/gossip" {
+			t.Errorf("main container must not mount gossip at /nomad/gossip")
 		}
-		init := sts.Spec.Template.Spec.InitContainers[0]
-		found := false
-		for _, m := range init.VolumeMounts {
-			if m.MountPath == "/nomad/gossip" {
-				found = true
-			}
+	}
+	init := sts.Spec.Template.Spec.InitContainers[0]
+	found := false
+	for _, m := range init.VolumeMounts {
+		if m.MountPath == "/nomad/gossip" {
+			found = true
 		}
-		Expect(found).To(BeTrue(), "init container must still mount gossip")
-	})
+	}
+	if !found {
+		t.Errorf("init container must still mount gossip at /nomad/gossip")
+	}
+}
 ```
 
-Run it — RED (main container currently mounts `/nomad/gossip`). Then remove the redundant mount in `resources_workload.go` (main container `VolumeMounts`):
+(`minimalCluster` and `buildStatefulSet` are package-scoped — same `package controller`.) Run it — RED (main container currently mounts `/nomad/gossip` at `resources_workload.go:212`). Then remove the redundant mount in `resources_workload.go` (main container `VolumeMounts`):
 
 ```go
 						VolumeMounts: []corev1.VolumeMount{
@@ -831,9 +837,18 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 The flap fires on the `!certReady` / `!extReady` FALSE path (which sets `Pending` + `finish` persists). An error return does not persist status, so it cannot flap — the fix targets only the false path.
 
-- [ ] **Step 1: Confirm the transient-false triggers**
+- [ ] **Step 1: Promote the `driveToReady` / `driftTo` test helpers to package scope**
 
-Read `certSecretReady` (in `internal/controller/security.go` or `nomadcluster_controller.go`) and confirm an **incomplete** cert Secret (missing `tls.crt`) returns `(false, nil)` — the path the test drives. (Clearing `gw.Status.Addresses` already makes `ensureManagedGateway` return `("", false, nil)`.)
+These are currently **local closures** inside `Describe("advertise.rpc drift guard", ...)` (`nomadcluster_controller_test.go:414` and `:439`), so new top-level `Describe`s (this task and Task 11) cannot reach them (`undefined: driveToReady`). Hoist both to **package-level functions** in `nomadcluster_controller_test.go` — signatures unchanged, they already take `ctx context.Context` as the first param:
+
+```go
+func driveToReady(ctx context.Context, name, ns, addrA string, servers int32, rpcPorts []int32) (*NomadClusterReconciler, *record.FakeRecorder) { /* moved body */ }
+func driftTo(ctx context.Context, name, ns, addrB string, r *NomadClusterReconciler) nomadv1alpha1.NomadCluster { /* moved body */ }
+```
+
+Delete the two `:=` closure definitions from inside the drift-guard `Describe`; its existing specs call them unchanged. Run `go test ./internal/controller/ -run TestControllers` to confirm the existing drift specs still pass after the hoist. (`minimalCluster`, `makeCertSecret`, `reconcileOnce`, `newFakeFactory`, `fakeNomad` are already package-scoped — fine.)
+
+**Confirmed fact (do not re-verify):** `certSecretReady` (`security.go:64-78`) returns `(false, nil)` when any of `tls.crt`/`tls.key`/`ca.crt` is empty — so `delete(s.Data, "tls.crt")` drives the `!certReady` **false path** (the flap trigger), not an error. Clearing `gw.Status.Addresses` makes `ensureManagedGateway` return `("", false, nil)`.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -964,7 +979,7 @@ var _ = Describe("Existing-mode gateway reason (#6)", func() {
 	existingCluster := func(name, ns string) *nomadv1alpha1.NomadCluster {
 		nc := minimalCluster(name, ns)
 		nc.Spec.ExternalAccess.Gateway.Mode = nomadv1alpha1.GatewayModeExisting
-		nc.Spec.ExternalAccess.Gateway.Ref = nomadv1alpha1.GatewayReference{Name: "shared", Namespace: ns}
+		nc.Spec.ExternalAccess.Gateway.Ref = &nomadv1alpha1.GatewayRef{Name: "shared", Namespace: ns}
 		return nc
 	}
 	reasonFor := func(name, ns string) string {
@@ -1022,7 +1037,7 @@ Add three more specs following the same shape, asserting these reasons (build th
 - **`RPCListenerInvalid`** — HTTP listener valid, but the RPC listener is missing or the wrong port/protocol.
 - **`NamespaceNotAdmitted`** — listeners present and correct, but `allowedRoutes` does not admit the CR's namespace (set the HTTP listener's `AllowedRoutes` to a namespace selector that excludes `ns`).
 
-(`GatewayReference` field/shape: confirm via `grep -n "Ref " api/v1alpha1/nomadcluster_types.go`; use the exact field names.)
+(**Confirmed types:** the type is `GatewayRef` — NOT `GatewayReference` — and `GatewaySpec.Ref` is a **pointer** `*GatewayRef` (`api/v1alpha1/nomadcluster_types.go:73,91`); the `&nomadv1alpha1.GatewayRef{...}` idiom matches `resources_gateway_test.go:139`.)
 
 - [ ] **Step 2: Run — verify RED**
 
@@ -1134,9 +1149,9 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 The `RaftAddressDrift` Warning re-fires every reconcile if a later apply/client error returns before `finish` persists `Status.ExternalAddress` (prevAddr never advances). Fix: persist status right after `checkAddressDrift`, before the error-prone applies. (SGE audit: `Status.ExternalAddress`'s only functional consumer is the drift guard's own `prevAddr` — early-persist is safe.)
 
-- [ ] **Step 1: Confirm `r.apply`'s write verb (for the test's failing-client wrapper)**
+- [ ] **Step 1: (Confirmed) `r.apply` uses SSA `Patch`; first applied object is the ConfigMap**
 
-Read the `apply` helper (`grep -rn "func (r \*NomadClusterReconciler) apply" internal/controller`). Note whether it uses server-side-apply `Patch` or `Create`/`Update`, and which object it applies first (the ConfigMap, `buildConfigMap`, at `nomadcluster_controller.go:132`). The test wrapper below targets `Patch`; if `apply` uses `Create`, override `Create` instead.
+`r.apply` is `r.Patch(ctx, obj, client.Apply, client.FieldOwner("nomad-operator"), client.ForceOwnership)` (`security.go:183`); the first apply in `Reconcile` is `buildConfigMap` (`nomadcluster_controller.go:132`). So the `configMapApplyFails.Patch` override below is correct — **keep `Patch`** (do not override `Create`). This task also depends on the Task-9 hoist of `driveToReady`/`driftTo` to package scope; run Task 9 first, or perform that hoist here if executing out of order.
 
 - [ ] **Step 2: Write the failing test (a client that fails the first ConfigMap apply)**
 
