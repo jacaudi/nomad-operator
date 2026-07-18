@@ -293,7 +293,11 @@ func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.NewNomadClient = DefaultNomadClientFactory
 	}
 	if r.Recorder == nil {
-		r.Recorder = mgr.GetEventRecorderFor("nomadcluster")
+		// SA1019: GetEventRecorderFor is genuinely deprecated, but its replacement
+		// GetEventRecorder returns events.EventRecorder, incompatible with our
+		// record.EventRecorder field and .Event() call sites; migrating is a
+		// behavioral change out of scope for lint cleanup.
+		r.Recorder = mgr.GetEventRecorderFor("nomadcluster") //nolint:staticcheck // SA1019: see comment above
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nomadv1alpha1.NomadCluster{}).
