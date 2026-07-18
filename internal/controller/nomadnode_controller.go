@@ -197,6 +197,13 @@ func (r *NomadNodeReconciler) driveDesired(ctx context.Context, nn *nomadv1alpha
 		if drainHandledThisGeneration(nn, stub) {
 			return nil // in progress (converging) or complete (converged)
 		}
+		// Adoption: the node is ALREADY draining (e.g. drained out-of-band, seeded
+		// at first mint). Don't re-issue — it would restart the deadline. Mark this
+		// generation handled and persist it (L-3, using the L-1 immediate-persist).
+		if stub.Drain {
+			nn.Status.DrainObservedGeneration = nn.Generation
+			return r.Status().Update(ctx, nn)
+		}
 		deadline := defaultDrainDeadline
 		if nn.Spec.Drain.Deadline != nil {
 			deadline = nn.Spec.Drain.Deadline.Duration // explicit value, incl. 0 = no deadline

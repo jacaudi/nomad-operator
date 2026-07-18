@@ -285,6 +285,24 @@ var _ = Describe("NomadNode reflector: drive", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(fake.drainCalls).To(HaveLen(1), "pass 2 must not re-issue via the persisted generation")
 	})
+
+	It("adopts an already-draining node without re-issuing the drain (L-3)", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-l3-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		// No pre-created CR: this pass MINTS it from an already-draining node.
+		fake := &fakeNodeOps{list: []*api.NodeListStub{
+			{ID: "l3id", Name: "l3", Status: "ready", SchedulingEligibility: "ineligible", Drain: true},
+		}}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.drainCalls).To(BeEmpty(), "adopting an in-progress drain must not re-issue (deadline would restart)")
+
+		var got nomadv1alpha1.NomadNode
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "l3", Namespace: ns.Name}, &got)).To(Succeed())
+		Expect(got.Status.DrainObservedGeneration).To(Equal(got.Generation))
+	})
 })
 
 var _ = Describe("NomadNode reflector: prune + cascade", func() {
