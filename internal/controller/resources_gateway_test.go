@@ -235,3 +235,173 @@ var _ = Describe("Existing gateway mode", func() {
 		Expect(meta_IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.CondExternalAccessReady)).To(BeFalse())
 	})
 })
+
+var _ = Describe("Existing-mode gateway reason (#6)", func() {
+	// helper: an Existing-mode cluster referencing a Gateway named "shared" in ns.
+	existingCluster := func(name, ns string) *nomadv1alpha1.NomadCluster {
+		nc := minimalCluster(name, ns)
+		nc.Spec.ExternalAccess.Gateway.Mode = nomadv1alpha1.GatewayModeExisting
+		nc.Spec.ExternalAccess.Gateway.Ref = &nomadv1alpha1.GatewayRef{Name: "shared", Namespace: ns}
+		return nc
+	}
+	reasonFor := func(name, ns string) string {
+		var got nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(context.Background(), types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+		for _, c := range got.Status.Conditions {
+			if c.Type == nomadv1alpha1.CondExternalAccessReady {
+				return c.Reason
+			}
+		}
+		return ""
+	}
+
+	It("reports GatewayNotFound when the referenced Gateway is absent", func() {
+		ctx := context.Background()
+		ns := "ex-notfound"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, ns)
+		Expect(k8s.Create(ctx, existingCluster("c", ns))).To(Succeed())
+		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+		reconcileOnce(r, "c", ns)
+		Expect(reasonFor("c", ns)).To(Equal("GatewayNotFound"))
+	})
+
+	It("reports GatewayNoAddress when the referenced Gateway is valid but has no address", func() {
+		ctx := context.Background()
+		ns := "ex-noaddr"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, ns)
+		// A fully-valid referenced Gateway (HTTP TLS listener + one RPC TCP
+		// listener per RPCPort), no address. existingCluster is built on
+		// minimalCluster, which sets 3 RPC ports (14647, 24647, 34647) — the
+		// brief's own snippet defines only the rpc-0 listener, which would
+		// trip RPCListenerInvalid on the missing rpc-1/rpc-2 listeners before
+		// ever reaching the no-address check. Adapted here to include all
+		// three so the test genuinely exercises the GatewayNoAddress path.
+		gw := &gwapiv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: ns},
+			Spec: gwapiv1.GatewaySpec{
+				GatewayClassName: "cilium",
+				Listeners: []gwapiv1.Listener{
+					{Name: listenerNameHTTP, Port: gwapiv1.PortNumber(portHTTP), Protocol: gwapiv1.TLSProtocolType,
+						Hostname: ptrHostname("nomad.example.com"), TLS: &gwapiv1.GatewayTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)}},
+					{Name: gwapiv1.SectionName(listenerNameRPC(0)), Port: 14647, Protocol: gwapiv1.TCPProtocolType},
+					{Name: gwapiv1.SectionName(listenerNameRPC(1)), Port: 24647, Protocol: gwapiv1.TCPProtocolType},
+					{Name: gwapiv1.SectionName(listenerNameRPC(2)), Port: 34647, Protocol: gwapiv1.TCPProtocolType},
+				},
+			},
+		}
+		Expect(k8s.Create(ctx, gw)).To(Succeed())
+		Expect(k8s.Create(ctx, existingCluster("c", ns))).To(Succeed())
+		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+		reconcileOnce(r, "c", ns)
+		Expect(reasonFor("c", ns)).To(Equal("GatewayNoAddress"))
+	})
+
+	It("reports HTTPListenerInvalid when the HTTP listener has the wrong hostname", func() {
+		ctx := context.Background()
+		ns := "ex-httpinvalid"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, ns)
+		// HTTP listener present but hostname doesn't match
+		// spec.externalAccess.gateway.httpHostname ("nomad.example.com", set by
+		// minimalCluster). RPC listeners are otherwise valid so the failure is
+		// attributable to the HTTP listener alone.
+		gw := &gwapiv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: ns},
+			Spec: gwapiv1.GatewaySpec{
+				GatewayClassName: "cilium",
+				Listeners: []gwapiv1.Listener{
+					{Name: listenerNameHTTP, Port: gwapiv1.PortNumber(portHTTP), Protocol: gwapiv1.TLSProtocolType,
+						Hostname: ptrHostname("wrong.example.com"), TLS: &gwapiv1.GatewayTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)}},
+					{Name: gwapiv1.SectionName(listenerNameRPC(0)), Port: 14647, Protocol: gwapiv1.TCPProtocolType},
+					{Name: gwapiv1.SectionName(listenerNameRPC(1)), Port: 24647, Protocol: gwapiv1.TCPProtocolType},
+					{Name: gwapiv1.SectionName(listenerNameRPC(2)), Port: 34647, Protocol: gwapiv1.TCPProtocolType},
+				},
+			},
+		}
+		Expect(k8s.Create(ctx, gw)).To(Succeed())
+		Expect(k8s.Create(ctx, existingCluster("c", ns))).To(Succeed())
+		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+		reconcileOnce(r, "c", ns)
+		Expect(reasonFor("c", ns)).To(Equal("HTTPListenerInvalid"))
+	})
+
+	It("reports RPCListenerInvalid when an RPC listener has the wrong protocol", func() {
+		ctx := context.Background()
+		ns := "ex-rpcinvalid"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, ns)
+		// HTTP listener valid; the ordinal-0 RPC listener is HTTP protocol instead of TCP.
+		gw := &gwapiv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: ns},
+			Spec: gwapiv1.GatewaySpec{
+				GatewayClassName: "cilium",
+				Listeners: []gwapiv1.Listener{
+					{Name: listenerNameHTTP, Port: gwapiv1.PortNumber(portHTTP), Protocol: gwapiv1.TLSProtocolType,
+						Hostname: ptrHostname("nomad.example.com"), TLS: &gwapiv1.GatewayTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)}},
+					{Name: gwapiv1.SectionName(listenerNameRPC(0)), Port: 14647, Protocol: gwapiv1.HTTPProtocolType},
+					{Name: gwapiv1.SectionName(listenerNameRPC(1)), Port: 24647, Protocol: gwapiv1.TCPProtocolType},
+					{Name: gwapiv1.SectionName(listenerNameRPC(2)), Port: 34647, Protocol: gwapiv1.TCPProtocolType},
+				},
+			},
+		}
+		Expect(k8s.Create(ctx, gw)).To(Succeed())
+		Expect(k8s.Create(ctx, existingCluster("c", ns))).To(Succeed())
+		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+		reconcileOnce(r, "c", ns)
+		Expect(reasonFor("c", ns)).To(Equal("RPCListenerInvalid"))
+	})
+
+	It("reports NamespaceNotAdmitted when the HTTP listener's allowedRoutes excludes the CR's namespace", func() {
+		ctx := context.Background()
+		ns := "ex-nsselect"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, ns)
+		// Listeners are otherwise fully valid, but the HTTP listener restricts
+		// admission to a namespace Selector — the Core support level this
+		// operator treats as fail-closed (not admitted), regardless of the CR's
+		// actual namespace or labels.
+		excludeSelector := &gwapiv1.AllowedRoutes{Namespaces: &gwapiv1.RouteNamespaces{
+			From:     new(gwapiv1.NamespacesFromSelector),
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"gateway-tenant": "none-match-this-namespace"}},
+		}}
+		gw := &gwapiv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: ns},
+			Spec: gwapiv1.GatewaySpec{
+				GatewayClassName: "cilium",
+				Listeners: []gwapiv1.Listener{
+					{Name: listenerNameHTTP, Port: gwapiv1.PortNumber(portHTTP), Protocol: gwapiv1.TLSProtocolType,
+						Hostname: ptrHostname("nomad.example.com"), TLS: &gwapiv1.GatewayTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)},
+						AllowedRoutes: excludeSelector},
+					{Name: gwapiv1.SectionName(listenerNameRPC(0)), Port: 14647, Protocol: gwapiv1.TCPProtocolType},
+					{Name: gwapiv1.SectionName(listenerNameRPC(1)), Port: 24647, Protocol: gwapiv1.TCPProtocolType},
+					{Name: gwapiv1.SectionName(listenerNameRPC(2)), Port: 34647, Protocol: gwapiv1.TCPProtocolType},
+				},
+			},
+		}
+		Expect(k8s.Create(ctx, gw)).To(Succeed())
+		Expect(k8s.Create(ctx, existingCluster("c", ns))).To(Succeed())
+		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+		reconcileOnce(r, "c", ns)
+		Expect(reasonFor("c", ns)).To(Equal("NamespaceNotAdmitted"))
+	})
+
+	It("still reports the generic WaitingForAddress reason for the Managed mode path", func() {
+		ctx := context.Background()
+		ns := "ex-generic-managed"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, ns)
+		nc := minimalCluster("c", ns) // Managed mode, no Gateway controller in envtest -> no address
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+		reconcileOnce(r, "c", ns)
+		Expect(reasonFor("c", ns)).To(Equal("WaitingForAddress"))
+	})
+})

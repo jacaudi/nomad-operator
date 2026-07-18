@@ -127,7 +127,13 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return r.finish(ctx, &nc, ctrl.Result{RequeueAfter: requeueShort})
 		}
 		nc.Status.Phase = nomadv1alpha1.PhasePending
-		setCondition(&nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionFalse, "WaitingForAddress", "external address not assigned")
+		// Existing mode sets a specific ExternalAccessReady reason inside
+		// ensureExistingGateway; only stamp the generic reason for the others (#6).
+		existing := nc.Spec.ExternalAccess.Mode == nomadv1alpha1.ExternalAccessGateway &&
+			nc.Spec.ExternalAccess.Gateway.Mode == nomadv1alpha1.GatewayModeExisting
+		if !existing {
+			setCondition(&nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionFalse, "WaitingForAddress", "external address not assigned")
+		}
 		return r.finish(ctx, &nc, ctrl.Result{RequeueAfter: requeueShort})
 	}
 	prevAddr := nc.Status.ExternalAddress
