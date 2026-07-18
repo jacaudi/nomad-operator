@@ -409,45 +409,6 @@ var _ = Describe("Managed provisioning", func() {
 })
 
 var _ = Describe("advertise.rpc drift guard", func() {
-	// driveToReady runs the two-reconcile Managed path to Ready at address A,
-	// returning the reconciler (with a fake recorder) for a follow-up drift.
-	driveToReady := func(ctx context.Context, name, ns, addrA string, servers int32, rpcPorts []int32) (*NomadClusterReconciler, *record.FakeRecorder) {
-		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
-		makeCertSecret(ctx, ns)
-		nc := minimalCluster(name, ns)
-		nc.Spec.Servers = servers
-		nc.Spec.ExternalAccess.Gateway.RPCPorts = rpcPorts
-		Expect(k8s.Create(ctx, nc)).To(Succeed())
-
-		rec := record.NewFakeRecorder(10)
-		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}
-		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake), Recorder: rec}
-
-		reconcileOnce(r, name, ns)
-		var gw gwapiv1.Gateway
-		Expect(k8s.Get(ctx, types.NamespacedName{Name: names(nc).Gateway, Namespace: ns}, &gw)).To(Succeed())
-		gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: addrA}}
-		Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
-		reconcileOnce(r, name, ns)
-
-		var got nomadv1alpha1.NomadCluster
-		Expect(k8s.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
-		Expect(got.Status.Phase).To(Equal(nomadv1alpha1.PhaseReady))
-		return r, rec
-	}
-
-	driftTo := func(ctx context.Context, name, ns, addrB string, r *NomadClusterReconciler) nomadv1alpha1.NomadCluster {
-		var gw gwapiv1.Gateway
-		// names(nc).Gateway == nc.Name + "-gateway" (internal/controller/names.go:37).
-		Expect(k8s.Get(ctx, types.NamespacedName{Name: name + "-gateway", Namespace: ns}, &gw)).To(Succeed())
-		gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: addrB}}
-		Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
-		reconcileOnce(r, name, ns)
-		var got nomadv1alpha1.NomadCluster
-		Expect(k8s.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
-		return got
-	}
-
 	It("does not fire on a stable address (no drift)", func() {
 		ctx := context.Background()
 		r, rec := driveToReady(ctx, "stable", "drift-stable", "10.0.0.5", 3, []int32{14647, 24647, 34647})
@@ -479,7 +440,102 @@ var _ = Describe("advertise.rpc drift guard", func() {
 	})
 })
 
+var _ = Describe("transient-read flap guard (#5)", func() {
+	It("keeps a Ready cluster Ready when the gateway address momentarily disappears", func() {
+		ctx := context.Background()
+		r, _ := driveToReady(ctx, "flapgw", "flap-gw", "10.0.0.5", 3, []int32{14647, 24647, 34647})
+
+		// Transient blip: gateway loses its address.
+		var gw gwapiv1.Gateway
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "flapgw-gateway", Namespace: "flap-gw"}, &gw)).To(Succeed())
+		gw.Status.Addresses = nil
+		Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
+		reconcileOnce(r, "flapgw", "flap-gw")
+
+		var got nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "flapgw", Namespace: "flap-gw"}, &got)).To(Succeed())
+		Expect(got.Status.Phase).To(Equal(nomadv1alpha1.PhaseReady), "must not demote to Pending on a transient gateway blip")
+		Expect(meta_IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.CondReady)).To(BeTrue())
+	})
+
+	It("keeps a Ready cluster Ready when the cert Secret momentarily becomes incomplete", func() {
+		ctx := context.Background()
+		r, _ := driveToReady(ctx, "flapcert", "flap-cert", "10.0.0.5", 3, []int32{14647, 24647, 34647})
+
+		// Transient blip: cert Secret loses ca.crt -> certSecretReady == false.
+		// ca.crt (not tls.crt) is used here: the apiserver enforces built-in
+		// validation on kubernetes.io/tls Secrets requiring non-empty tls.crt/
+		// tls.key, so deleting tls.crt is rejected with a 422 before this test
+		// ever reaches the reconciler under test. ca.crt has no such apiserver
+		// constraint and still trips certSecretReady's identical missing-key
+		// FALSE path (security.go:72-76).
+		var s corev1.Secret
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "nomad-tls", Namespace: "flap-cert"}, &s)).To(Succeed())
+		delete(s.Data, "ca.crt")
+		Expect(k8s.Update(ctx, &s)).To(Succeed())
+		reconcileOnce(r, "flapcert", "flap-cert")
+
+		var got nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "flapcert", Namespace: "flap-cert"}, &got)).To(Succeed())
+		Expect(got.Status.Phase).To(Equal(nomadv1alpha1.PhaseReady), "must not demote to Pending on a transient cert blip")
+	})
+
+	It("still gates an unprovisioned cluster to Pending on a missing address", func() {
+		ctx := context.Background()
+		ns := "flap-new"
+		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+		makeCertSecret(ctx, ns)
+		nc := minimalCluster("fresh", ns)
+		Expect(k8s.Create(ctx, nc)).To(Succeed())
+		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}
+		r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake)}
+		reconcileOnce(r, "fresh", ns) // gateway has no address yet
+		var got nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "fresh", Namespace: ns}, &got)).To(Succeed())
+		Expect(got.Status.Phase).To(Equal(nomadv1alpha1.PhasePending))
+	})
+})
+
 func reconcileOnce(r *NomadClusterReconciler, name, ns string) {
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})
 	Expect(err).NotTo(HaveOccurred())
+}
+
+// driveToReady runs the two-reconcile Managed path to Ready at address A,
+// returning the reconciler (with a fake recorder) for a follow-up drift.
+func driveToReady(ctx context.Context, name, ns, addrA string, servers int32, rpcPorts []int32) (*NomadClusterReconciler, *record.FakeRecorder) {
+	Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+	makeCertSecret(ctx, ns)
+	nc := minimalCluster(name, ns)
+	nc.Spec.Servers = servers
+	nc.Spec.ExternalAccess.Gateway.RPCPorts = rpcPorts
+	Expect(k8s.Create(ctx, nc)).To(Succeed())
+
+	rec := record.NewFakeRecorder(10)
+	fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}
+	r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake), Recorder: rec}
+
+	reconcileOnce(r, name, ns)
+	var gw gwapiv1.Gateway
+	Expect(k8s.Get(ctx, types.NamespacedName{Name: names(nc).Gateway, Namespace: ns}, &gw)).To(Succeed())
+	gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: addrA}}
+	Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
+	reconcileOnce(r, name, ns)
+
+	var got nomadv1alpha1.NomadCluster
+	Expect(k8s.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+	Expect(got.Status.Phase).To(Equal(nomadv1alpha1.PhaseReady))
+	return r, rec
+}
+
+func driftTo(ctx context.Context, name, ns, addrB string, r *NomadClusterReconciler) nomadv1alpha1.NomadCluster {
+	var gw gwapiv1.Gateway
+	// names(nc).Gateway == nc.Name + "-gateway" (internal/controller/names.go:37).
+	Expect(k8s.Get(ctx, types.NamespacedName{Name: name + "-gateway", Namespace: ns}, &gw)).To(Succeed())
+	gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: addrB}}
+	Expect(k8s.Status().Update(ctx, &gw)).To(Succeed())
+	reconcileOnce(r, name, ns)
+	var got nomadv1alpha1.NomadCluster
+	Expect(k8s.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &got)).To(Succeed())
+	return got
 }

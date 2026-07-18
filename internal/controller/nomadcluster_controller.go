@@ -98,6 +98,11 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 	if !certReady {
+		if nc.Status.Phase == nomadv1alpha1.PhaseReady || nc.Status.Phase == nomadv1alpha1.PhaseDegraded {
+			// Provisioned cluster, transient cert-read blip: don't demote or flip
+			// conditions; keep last-known state and requeue to retry (#5).
+			return r.finish(ctx, &nc, ctrl.Result{RequeueAfter: requeueShort})
+		}
 		nc.Status.Phase = nomadv1alpha1.PhasePending
 		setCondition(&nc, nomadv1alpha1.CondReady, metav1ConditionFalse, "WaitingForCert", "cert Secret not ready")
 		return r.finish(ctx, &nc, ctrl.Result{RequeueAfter: requeueShort})
@@ -116,6 +121,11 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 	if !extReady {
+		if nc.Status.Phase == nomadv1alpha1.PhaseReady || nc.Status.Phase == nomadv1alpha1.PhaseDegraded {
+			// Provisioned cluster, transient address-read blip: keep last-known
+			// state and requeue; never demote a running cluster to Pending (#5).
+			return r.finish(ctx, &nc, ctrl.Result{RequeueAfter: requeueShort})
+		}
 		nc.Status.Phase = nomadv1alpha1.PhasePending
 		setCondition(&nc, nomadv1alpha1.CondExternalAccessReady, metav1ConditionFalse, "WaitingForAddress", "external address not assigned")
 		return r.finish(ctx, &nc, ctrl.Result{RequeueAfter: requeueShort})
