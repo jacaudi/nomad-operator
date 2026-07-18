@@ -252,6 +252,9 @@ docs/                    User docs (this README's TOC) + docs/development histor
 
 - **[Architecture](docs/architecture.md)** — resources, control-plane internals,
   reconcile model, security model.
+- **[Production example](docs/production-example.md)** — end-to-end: a CA synced
+  by External Secrets Operator, certs issued by cert-manager, an HA cluster, a
+  TrueNAS client, and a workload.
 - **[Edge agents](docs/agents/README.md)** — attach Nomad clients from outside
   the cluster ([bare metal](docs/agents/bare-metal-nspawn.md) ·
   [Mac mini](docs/agents/mac-mini-container.md) ·
