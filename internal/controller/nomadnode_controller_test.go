@@ -304,6 +304,50 @@ var _ = Describe("NomadNode reflector: drive", func() {
 		Expect(k8s.Get(ctx, types.NamespacedName{Name: "l3", Namespace: ns.Name}, &got)).To(Succeed())
 		Expect(got.Status.DrainObservedGeneration).To(Equal(got.Generation))
 	})
+
+	It("re-issues a drain when it was cancelled out-of-band (B2)", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-b2-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		nn := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "b2", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadNodeSpec{
+				ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "b2",
+				Drain: &nomadv1alpha1.NodeDrainSpec{Deadline: &metav1.Duration{Duration: time.Hour}},
+			},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "b2", Namespace: ns.Name}, nn)).To(Succeed())
+		nn.Status.DrainObservedGeneration = nn.Generation // we already issued it this generation
+		Expect(k8s.Status().Update(ctx, nn)).To(Succeed())
+
+		// Out-of-band cancel: Nomad reports NOT draining, and the last drain is not complete.
+		fake := &fakeNodeOps{list: []*api.NodeListStub{
+			{ID: "b2id", Name: "b2", Status: "ready", SchedulingEligibility: "eligible", Drain: false, LastDrain: nil},
+		}}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.drainCalls).To(HaveLen(1), "an out-of-band-cancelled drain must be re-issued to satisfy spec")
+	})
+
+	It("does not call SetEligibility when eligibility already matches (B3)", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-b3-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		nn := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "b3", Namespace: ns.Name},
+			Spec:       nomadv1alpha1.NomadNodeSpec{ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "b3", Eligible: true},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+
+		// Nomad already reports eligible -> compare-before-write must be a no-op.
+		fake := &fakeNodeOps{list: []*api.NodeListStub{{ID: "b3id", Name: "b3", Status: "ready", SchedulingEligibility: "eligible"}}}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.eligCalls).To(BeEmpty(), "matching eligibility must not trigger a write")
+	})
 })
 
 var _ = Describe("NomadNode reflector: prune + cascade", func() {
