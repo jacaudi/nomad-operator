@@ -251,6 +251,40 @@ var _ = Describe("NomadNode reflector: drive", func() {
 		Expect(got.Status.DrainObservedGeneration).To(Equal(nn.Generation),
 			"driveDesired must persist the generation itself, not rely on mirrorStatus")
 	})
+
+	It("does not re-issue a drain across passes via the persisted generation (B1)", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-b1-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		nn := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "b1", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadNodeSpec{
+				ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "b1",
+				Drain: &nomadv1alpha1.NodeDrainSpec{Deadline: &metav1.Duration{Duration: time.Hour}},
+			},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+
+		// Pass 1: node not yet draining -> drain issued, generation persisted.
+		fake := &fakeNodeOps{list: []*api.NodeListStub{
+			{ID: "b1id", Name: "b1", Status: "ready", SchedulingEligibility: "eligible", Drain: false},
+		}}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.drainCalls).To(HaveLen(1))
+
+		var mid nomadv1alpha1.NomadNode
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "b1", Namespace: ns.Name}, &mid)).To(Succeed())
+		Expect(mid.Status.DrainObservedGeneration).To(Equal(mid.Generation))
+
+		// Pass 2: node now draining (in progress) -> must NOT re-issue.
+		fake.list[0].Drain = true
+		fake.list[0].SchedulingEligibility = "ineligible"
+		_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.drainCalls).To(HaveLen(1), "pass 2 must not re-issue via the persisted generation")
+	})
 })
 
 var _ = Describe("NomadNode reflector: prune + cascade", func() {
