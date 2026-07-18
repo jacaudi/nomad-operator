@@ -307,24 +307,47 @@ var _ = Describe("NomadNode reflector: drive", func() {
 })
 
 var _ = Describe("NomadNode reflector: prune + cascade", func() {
-	It("deletes a CR whose node is absent from a successful list", func(ctx SpecContext) {
-		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-prune-"}}
+	It("does NOT mass-prune when a successful list is unexpectedly empty (L-2)", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-l2-"}}
 		Expect(k8s.Create(ctx, ns)).To(Succeed())
 		nc := readyCluster(ctx, ns.Name)
 
-		// First pass: node present -> CR minted.
+		// Pass 1: node present -> CR minted.
 		fake := &fakeNodeOps{list: []*api.NodeListStub{{ID: "g1", Name: "ghost", Status: "ready", SchedulingEligibility: "eligible"}}}
 		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8s.Get(ctx, types.NamespacedName{Name: "ghost", Namespace: ns.Name}, &nomadv1alpha1.NomadNode{})).To(Succeed())
 
-		// Second pass: empty list -> CR pruned.
+		// Pass 2: empty (but successful) list while a CR exists -> NOT pruned
+		// (a suspect full-empty must not mass-delete; scale-to-zero retains CRs).
 		fake.list = nil
+		_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "ghost", Namespace: ns.Name}, &nomadv1alpha1.NomadNode{})).To(Succeed(),
+			"an unexpectedly-empty list must not mass-prune existing CRs (L-2)")
+	})
+
+	It("still prunes an absent node from a NON-empty successful list", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-l2b-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		fake := &fakeNodeOps{list: []*api.NodeListStub{
+			{ID: "g1", Name: "ghost", Status: "ready", SchedulingEligibility: "eligible"},
+			{ID: "k1", Name: "keep", Status: "ready", SchedulingEligibility: "eligible"},
+		}}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		// "ghost" gone from a still-non-empty list -> pruned; "keep" remains.
+		fake.list = []*api.NodeListStub{{ID: "k1", Name: "keep", Status: "ready", SchedulingEligibility: "eligible"}}
 		_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 		err = k8s.Get(ctx, types.NamespacedName{Name: "ghost", Namespace: ns.Name}, &nomadv1alpha1.NomadNode{})
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "keep", Namespace: ns.Name}, &nomadv1alpha1.NomadNode{})).To(Succeed())
 	})
 
 	It("does not prune when the list fails", func(ctx SpecContext) {

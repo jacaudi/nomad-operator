@@ -377,6 +377,17 @@ func (r *NomadNodeReconciler) pruneAbsent(ctx context.Context, nc *nomadv1alpha1
 	if err := r.List(ctx, &list, client.InNamespace(nc.Namespace), client.MatchingLabels(names(nc).Labels())); err != nil {
 		return err
 	}
+	// L-2: a successful-but-empty node list would prune EVERY CR. Treat a
+	// sudden full-empty as suspect (transient API glitch) rather than a genuine
+	// scale-to-zero: skip the mass-delete and warn. Accepted consequence: a
+	// cluster that legitimately runs zero clients retains its (stale) CRs until
+	// a node reappears (non-empty list -> normal per-node prune) or the cluster
+	// is deleted (ownerRef GC). This is preferred over a spurious mass-delete.
+	if len(present) == 0 && len(list.Items) > 0 {
+		log.FromContext(ctx).Info("skipping prune: node list is unexpectedly empty while CRs exist (L-2)",
+			"cluster", nc.Name, "existingCRs", len(list.Items))
+		return nil
+	}
 	for i := range list.Items {
 		nn := &list.Items[i]
 		if nn.Spec.ClusterRef.Name != nc.Name {
