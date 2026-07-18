@@ -23,11 +23,19 @@ import (
 // NomadNode condition types and reasons.
 const (
 	NomadNodeCondReconciled = "Reconciled"
+	// NomadNodeCondDrainSpecPendingRestart is True when the desired drain spec
+	// was edited while the node was already draining: the in-flight drain keeps
+	// its original parameters (re-issuing would restart the deadline), so the
+	// edit takes effect only on the next re-issued drain. It is False once the
+	// desired spec again matches the in-flight drain (e.g. the edit is reverted).
+	NomadNodeCondDrainSpecPendingRestart = "DrainSpecPendingRestart"
 
 	ReasonClusterNotReady   = "ClusterNotReady"
 	ReasonDuplicateNodeName = "DuplicateNodeName"
 	ReasonNodeNotFound      = "NodeNotFound"
 	ReasonReconciled        = "Reconciled"
+	ReasonDrainSpecEdited   = "DrainSpecEdited"
+	ReasonDrainSpecInSync   = "DrainSpecInSync"
 )
 
 // NodeReference names a NomadCluster in the same namespace.

@@ -219,6 +219,23 @@ func (r *NomadNodeReconciler) seedDrain(ctx context.Context, id string, ops Noma
 
 const defaultDrainDeadline = time.Hour
 
+// drainSpecDiverged reports whether the desired drain spec differs from the
+// drain currently in flight on Nomad (live). The desired deadline uses the same
+// 1h default as driveDesired so a nil-vs-default never false-fires. An
+// unreadable live strategy (nil node / nil DrainStrategy) returns false: a
+// divergence we cannot substantiate is not warned.
+func drainSpecDiverged(nn *nomadv1alpha1.NomadNode, live *api.Node) bool {
+	if live == nil || live.DrainStrategy == nil {
+		return false
+	}
+	desiredDeadline := defaultDrainDeadline
+	if nn.Spec.Drain.Deadline != nil {
+		desiredDeadline = nn.Spec.Drain.Deadline.Duration
+	}
+	return desiredDeadline != live.DrainStrategy.Deadline ||
+		nn.Spec.Drain.IgnoreSystemJobs != live.DrainStrategy.IgnoreSystemJobs
+}
+
 // driveDesired reconciles spec.eligible/drain onto Nomad. Drain, when present,
 // transiently dominates eligibility (Nomad forces a draining node ineligible),
 // so eligibility is only driven when no drain is desired.
@@ -231,6 +248,23 @@ func (r *NomadNodeReconciler) driveDesired(ctx context.Context, nn *nomadv1alpha
 		// at first mint). Don't re-issue — it would restart the deadline. Mark this
 		// generation handled and persist it (L-3, using the L-1 immediate-persist).
 		if stub.Drain {
+			// A generation bump on an already-draining node can mean the user
+			// EDITED the drain spec; that edit is silently dropped (re-issuing
+			// would restart the deadline — L-3). Surface it: if the desired spec
+			// diverges from the in-flight drain, flag DrainSpecPendingRestart so
+			// the ignored edit is observable. It clears (False) once the spec
+			// again matches the in-flight drain (e.g. the edit is reverted).
+			live, err := ops.NodeInfo(ctx, stub.ID)
+			if err != nil {
+				live = nil // unreadable live strategy: don't warn on data we lack
+			}
+			if drainSpecDiverged(nn, live) {
+				setNodeCondition(nn, nomadv1alpha1.NomadNodeCondDrainSpecPendingRestart, metav1.ConditionTrue,
+					nomadv1alpha1.ReasonDrainSpecEdited, "drain spec edited mid-drain; the change takes effect on the next re-issued drain, not the in-flight one")
+			} else {
+				setNodeCondition(nn, nomadv1alpha1.NomadNodeCondDrainSpecPendingRestart, metav1.ConditionFalse,
+					nomadv1alpha1.ReasonDrainSpecInSync, "desired drain spec matches the in-flight drain")
+			}
 			nn.Status.DrainObservedGeneration = nn.Generation
 			return r.Status().Update(ctx, nn)
 		}

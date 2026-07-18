@@ -205,6 +205,70 @@ var _ = Describe("NomadNode reflector: drive", func() {
 		Expect(fake.drainCalls).To(BeEmpty(), "in-progress drain must not re-issue (deadline would slide)")
 	})
 
+	It("signals DrainSpecPendingRestart when the drain spec is edited mid-drain, without re-issuing", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-drain-edit-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		// spec wants a 30m deadline; Nomad reports the in-flight drain at 1h.
+		nn := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "de1", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadNodeSpec{
+				ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "de1",
+				Drain: &nomadv1alpha1.NodeDrainSpec{Deadline: &metav1.Duration{Duration: 30 * time.Minute}},
+			},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+		// Generation bumped by the edit; drain never observed at this generation.
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "de1", Namespace: ns.Name}, nn)).To(Succeed())
+
+		fake := &fakeNodeOps{
+			list: []*api.NodeListStub{{ID: "de1id", Name: "de1", Status: "ready", SchedulingEligibility: "ineligible", Drain: true}},
+			info: map[string]*api.Node{
+				"de1id": {DrainStrategy: &api.DrainStrategy{DrainSpec: api.DrainSpec{Deadline: time.Hour}}},
+			},
+		}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.drainCalls).To(BeEmpty(), "an edited mid-drain spec must not re-issue (deadline would restart)")
+
+		got := &nomadv1alpha1.NomadNode{}
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "de1", Namespace: ns.Name}, got)).To(Succeed())
+		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.NomadNodeCondDrainSpecPendingRestart)).
+			To(BeTrue(), "the ignored edit must be surfaced as a condition")
+	})
+
+	It("does not signal DrainSpecPendingRestart when a freshly-adopted drain matches Nomad", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-drain-adopt-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		// spec deadline equals the in-flight drain deadline (as seedDrain would set it).
+		nn := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "da1", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadNodeSpec{
+				ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "da1",
+				Drain: &nomadv1alpha1.NodeDrainSpec{Deadline: &metav1.Duration{Duration: time.Hour}},
+			},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+
+		fake := &fakeNodeOps{
+			list: []*api.NodeListStub{{ID: "da1id", Name: "da1", Status: "ready", SchedulingEligibility: "ineligible", Drain: true}},
+			info: map[string]*api.Node{
+				"da1id": {DrainStrategy: &api.DrainStrategy{DrainSpec: api.DrainSpec{Deadline: time.Hour}}},
+			},
+		}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nc.Name, Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.drainCalls).To(BeEmpty(), "an in-sync adopted drain must not re-issue")
+
+		got := &nomadv1alpha1.NomadNode{}
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "da1", Namespace: ns.Name}, got)).To(Succeed())
+		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.NomadNodeCondDrainSpecPendingRestart)).
+			To(BeFalse(), "a matching adopted drain must not false-fire the signal")
+	})
+
 	It("cancels a drain when spec.drain is removed", func(ctx SpecContext) {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-cancel-"}}
 		Expect(k8s.Create(ctx, ns)).To(Succeed())
