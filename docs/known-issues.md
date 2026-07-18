@@ -29,8 +29,19 @@ Source: slice-2 whole-branch review, 2026-07-11.
 - **Proposed fix:** in slice 6, populate `status.quorum` from the actual peer set
   (`Status().Peers()`), alongside `status.members` and the friendly-leader-name mapping.
 
+### Integration coverage
+
+As of 2026-07-18 (slice 6c), `make test-integration` runs all six live specs
+green against a real Nomad v2.0.4 instance via the Docker harness. This closes
+the Foundation open item that had left live-cluster behavior (including the
+`status.quorum`/`status.members` measurement above) verified only against
+mocks/envtest.
+
 ## 2. Two `golangci-lint` findings (prealloc, unparam)
 
+- **Status: Resolved (2026-07-18, slice 6c).** Both findings fixed in `ac1c726`
+  (`resources_gateway.go` `listeners` slice preallocated; `security_test.go`
+  `makeCertSecret` `name` parameter dropped/used).
 - **Severity:** Minor · **Area:** lint / cleanup
 - **Locations:**
   - `internal/controller/resources_gateway.go:30` — `prealloc`: `listeners` slice should be
@@ -44,6 +55,10 @@ Source: slice-2 whole-branch review, 2026-07-11.
 
 ## 3. Unused `NomadOps` interface methods (`Ping`, `ServerHealthy`)
 
+- **Status: Resolved (2026-07-18, slice 6c).** `ac1c726` trims `NomadOps` to
+  `Leader`/`ACLBootstrap`/`ServerHealth`, removing `Ping` and `ServerHealthy`
+  from the interface. `(*nomad.Client).ServerHealthy` (`internal/nomad/client.go`)
+  is retained as a concrete method, per the note below.
 - **Severity:** Minor · **Area:** API surface / YAGNI
 - **Location:** `internal/controller/nomadcluster_controller.go` (`NomadOps` interface, ~:42-44)
 - **Problem:** `NomadOps.Ping` and `NomadOps.ServerHealthy` are never called by the
@@ -56,6 +71,10 @@ Source: slice-2 whole-branch review, 2026-07-11.
 
 ## 4. Redundant gossip Secret mount on the main container
 
+- **Status: Resolved (2026-07-18, slice 6c).** `ac1c726` removes the `gossip`
+  volume mount from the main `nomad` container in `buildStatefulSet`
+  (`internal/controller/resources_workload.go`); the init container's mount is
+  unaffected.
 - **Severity:** Minor · **Area:** workload builder
 - **Location:** `internal/controller/resources_workload.go` (main `nomad` container volume
   mounts, ~:212)
@@ -67,6 +86,10 @@ Source: slice-2 whole-branch review, 2026-07-11.
 
 ## 5. `Ready`→`Pending` flap on a transient cert/gateway read
 
+- **Status: Resolved (2026-07-18, slice 6c).** `7ae87d7` guards both the cert
+  and gateway gates so a `Ready`/`Degraded` cluster is no longer demoted to
+  `Pending` on a transient read; a provisioned cluster keeps its phase and
+  requeues instead.
 - **Severity:** Minor · **Area:** reconciler robustness
 - **Location:** `internal/controller/nomadcluster_controller.go` (cert gate ~:92-96 and
   gateway gate ~:103-107)
@@ -80,6 +103,10 @@ Source: slice-2 whole-branch review, 2026-07-11.
 
 ## 6. Existing-mode `ExternalAccessReady=False` reason is imprecise
 
+- **Status: Resolved (2026-07-18, slice 6c).** `bb7bd05` returns a per-failure
+  reason from `ensureExistingGateway` (`GatewayNotFound`, `HTTPListenerInvalid`,
+  `NamespaceNotAdmitted`, `RPCListenerInvalid`, `GatewayNoAddress`) instead of
+  the single generic `WaitingForAddress` reason.
 - **Severity:** Minor · **Area:** Existing-mode diagnostics
 - **Location:** `internal/controller/nomadcluster_controller.go` (gateway gate condition,
   ~:105) and `ensureExistingGateway` in `internal/controller/resources_gateway.go`
@@ -94,6 +121,55 @@ Source: slice-2 whole-branch review, 2026-07-11.
   design change beyond the slice.
 - **Proposed fix:** return a typed verification result (reason enum + message) from
   `ensureExistingGateway` and surface it in the `ExternalAccessReady` condition.
+
+---
+
+# Won't-fix (by design)
+
+Items reviewed during slice 6c and deliberately not changed. Recorded so they
+aren't re-litigated as open issues.
+
+## 6b Minor 3. Empty `ServerHealth` read keeps prior `Members`/`Quorum`
+
+- **Area:** reconciler / status · **Found:** slice 6b restart-resilience design review
+- **Behavior:** if an `AutopilotServerHealth` read returns an empty result, the
+  reconciler keeps the previously-recorded `status.members`/`status.quorum`
+  rather than zeroing them out.
+- **Rationale:** this is the intended keep-prior-status behavior specified in
+  `docs/designs/2026-07-17-nomadcluster-restart-resilience-design.md` §6.3 —
+  a momentarily empty read should not erase a known-good status. It is also
+  near-impossible to trigger while a Raft leader exists, since the read comes
+  from the leader's own Autopilot state.
+- **Disposition:** won't-fix — this is the designed behavior, not a defect.
+
+## 6a. `finalizeNamespace` reserved-name guard — phantom finding
+
+- **Area:** reconciler / namespace lifecycle · **Found:** slice 6a review pass
+- **Behavior:** no reserved-name guard exists in `finalizeNamespace`.
+- **Rationale:** the only reserved-name guard is in `reconcileNamespace`
+  (rejecting `default`), which is intentional defense-in-depth on the create
+  path. It is also CEL-redundant — `NomadNamespace.spec.namespaceName` already
+  carries a `!= 'default'` CEL rule and the field is immutable, so the guard
+  in Go can never actually fire in practice.
+- **Disposition:** won't-fix — there is nothing to fix; the finding
+  misidentified where the guard lives and its necessity.
+
+## 6a. Conflict-then-delete on a shared namespace
+
+- **Area:** reconciler / namespace lifecycle · **Found:** slice 6a review pass
+- **Behavior:** when two `NomadNamespace` objects race to claim the same
+  underlying Nomad namespace, the losing object's finalizer deletes the
+  namespace when the winning object is itself deleted, which can transiently
+  remove a namespace still logically "owned" by the loser before it
+  re-registers.
+- **Rationale:** the loser self-heals on its next reconcile (it re-registers
+  the namespace once the winner's finalizer has run), and this behavior
+  deliberately mirrors the equivalent conflict handling already merged in
+  `NomadPool`. Diverging the two CRDs' conflict semantics would be a bigger
+  inconsistency than the transient window.
+- **Disposition:** won't-fix for parity with `NomadPool`. If the transient
+  delete/recreate window is ever judged unacceptable, change the conflict
+  handling in **both** CRDs together, not just `NomadNamespace`.
 
 ---
 
@@ -156,6 +232,11 @@ and are corrected here (slice 6b,
 
 ## 7. Existing mode: operator does not watch the referenced Gateway
 
+- **Status: Resolved (2026-07-18, slice 6c).** Already fixed pre-6c by
+  `fbbf66e` (2026-07-11): `SetupWithManager` adds a `Watches` on
+  `gatewayapi.Gateway` with a `gatewayToClusters` map function, plus `Owns()`
+  for every operator-created child. Confirmed at 6c reconciliation time; no
+  further work was needed this slice.
 - **Severity:** Minor · **Area:** reconciler / Existing-mode gateway · **Found:** local single-node e2e test, 2026-07-11
 - **Location:** `internal/controller/nomadcluster_controller.go` `SetupWithManager` (watch set) +
   `ensureExistingGateway` in `internal/controller/resources_gateway.go`
