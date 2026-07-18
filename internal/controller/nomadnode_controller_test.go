@@ -223,6 +223,34 @@ var _ = Describe("NomadNode reflector: drive", func() {
 		Expect(fake.drainCalls[0].spec).To(BeNil(), "cancel passes a nil spec")
 		Expect(fake.drainCalls[0].markEligible).To(BeTrue(), "markEligible = spec.eligible (true)")
 	})
+
+	It("persists DrainObservedGeneration when it issues a drain, independent of mirrorStatus (L-1)", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-l1-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		nn := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "l1", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadNodeSpec{
+				ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "l1",
+				Drain: &nomadv1alpha1.NodeDrainSpec{Deadline: &metav1.Duration{Duration: time.Hour}},
+			},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "l1", Namespace: ns.Name}, nn)).To(Succeed())
+
+		fake := &fakeNodeOps{}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		stub := &api.NodeListStub{ID: "l1id", Name: "l1", Status: "ready", SchedulingEligibility: "eligible", Drain: false}
+
+		// Call driveDesired directly — NOT the full Reconcile — so mirrorStatus never runs.
+		Expect(r.driveDesired(ctx, nn, stub, fake)).To(Succeed())
+		Expect(fake.drainCalls).To(HaveLen(1))
+
+		var got nomadv1alpha1.NomadNode
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "l1", Namespace: ns.Name}, &got)).To(Succeed())
+		Expect(got.Status.DrainObservedGeneration).To(Equal(nn.Generation),
+			"driveDesired must persist the generation itself, not rely on mirrorStatus")
+	})
 })
 
 var _ = Describe("NomadNode reflector: prune + cascade", func() {

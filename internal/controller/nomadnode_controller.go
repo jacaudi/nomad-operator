@@ -206,7 +206,9 @@ func (r *NomadNodeReconciler) driveDesired(ctx context.Context, nn *nomadv1alpha
 			return err
 		}
 		nn.Status.DrainObservedGeneration = nn.Generation
-		return nil
+		// Persist the generation NOW, decoupled from mirrorStatus: a later
+		// status-write failure must not lose it and cause a re-issue (L-1).
+		return r.Status().Update(ctx, nn)
 	}
 
 	// No drain desired. If the node is still draining, cancel it, marking it
