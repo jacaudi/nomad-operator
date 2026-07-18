@@ -47,9 +47,7 @@ const requeueShort = 15 * time.Second
 // the consumer per Go convention; *nomad.Client satisfies it, and envtest
 // injects a fake.
 type NomadOps interface {
-	Ping(ctx context.Context) error
 	Leader(ctx context.Context) (string, error)
-	ServerHealthy(ctx context.Context) (bool, error)
 	ACLBootstrap(ctx context.Context, bootstrapToken string) (string, error)
 	ServerHealth(ctx context.Context) ([]nomad.NomadMember, error)
 }

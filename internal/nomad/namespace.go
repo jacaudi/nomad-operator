@@ -21,7 +21,7 @@ func (c *Client) GetNamespace(ctx context.Context, name string) (*api.Namespace,
 
 // UpsertNamespace creates or updates a namespace (Nomad's Register is an upsert).
 func (c *Client) UpsertNamespace(ctx context.Context, ns *api.Namespace) error {
-	if _, err := c.api.Namespaces().Register(ns, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+	if _, err := c.api.Namespaces().Register(ns, writeOpts(ctx)); err != nil {
 		return fmt.Errorf("nomad: upsert namespace %q: %w", ns.Name, err)
 	}
 	return nil
@@ -30,7 +30,7 @@ func (c *Client) UpsertNamespace(ctx context.Context, ns *api.Namespace) error {
 // DeleteNamespace deletes a namespace by name. Nomad refuses to delete a
 // namespace that still has non-terminal jobs (see IsNamespaceNotEmpty).
 func (c *Client) DeleteNamespace(ctx context.Context, name string) error {
-	if _, err := c.api.Namespaces().Delete(name, (&api.WriteOptions{}).WithContext(ctx)); err != nil {
+	if _, err := c.api.Namespaces().Delete(name, writeOpts(ctx)); err != nil {
 		return fmt.Errorf("nomad: delete namespace %q: %w", name, err)
 	}
 	return nil
@@ -41,7 +41,7 @@ func (c *Client) DeleteNamespace(ctx context.Context, name string) error {
 // only for the informational status.jobCount (the delete gate is the Delete
 // refusal, not this count).
 func (c *Client) CountNamespaceJobs(ctx context.Context, name string) (int, error) {
-	jobs, _, err := c.api.Jobs().List((&api.QueryOptions{Namespace: name}).WithContext(ctx))
+	jobs, _, err := c.api.Jobs().List(nsQueryOpts(ctx, name))
 	if err != nil {
 		return 0, fmt.Errorf("nomad: list namespace %q jobs: %w", name, err)
 	}

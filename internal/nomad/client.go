@@ -65,6 +65,11 @@ func nsQueryOpts(ctx context.Context, namespace string) *api.QueryOptions {
 	return (&api.QueryOptions{Namespace: namespace}).WithContext(ctx)
 }
 
+// writeOpts builds plain WriteOptions carrying the context.
+func writeOpts(ctx context.Context) *api.WriteOptions {
+	return (&api.WriteOptions{}).WithContext(ctx)
+}
+
 // ListNodes returns the node stubs registered with Nomad.
 func (c *Client) ListNodes(ctx context.Context) ([]*api.NodeListStub, error) {
 	nodes, _, err := c.api.Nodes().List(queryOpts(ctx))

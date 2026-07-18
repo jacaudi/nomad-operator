@@ -163,7 +163,7 @@ var _ = Describe("Managed provisioning", func() {
 		ctx := context.Background()
 		ns := "mgd"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
-		makeCertSecret(ctx, "nomad-tls", ns)
+		makeCertSecret(ctx, ns)
 		nc := minimalCluster("prod", ns)
 		Expect(k8s.Create(ctx, nc)).To(Succeed())
 
@@ -205,7 +205,7 @@ var _ = Describe("Managed provisioning", func() {
 		ctx := context.Background()
 		ns := "mgd-noleader"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
-		makeCertSecret(ctx, "nomad-tls", ns)
+		makeCertSecret(ctx, ns)
 		nc := minimalCluster("noleader", ns)
 		Expect(k8s.Create(ctx, nc)).To(Succeed())
 
@@ -236,7 +236,7 @@ var _ = Describe("Managed provisioning", func() {
 		ctx := context.Background()
 		ns := "mgd-quorumlost"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
-		makeCertSecret(ctx, "nomad-tls", ns)
+		makeCertSecret(ctx, ns)
 		nc := minimalCluster("quorumlost", ns)
 		Expect(k8s.Create(ctx, nc)).To(Succeed())
 
@@ -286,7 +286,7 @@ var _ = Describe("Managed provisioning", func() {
 		ctx := context.Background()
 		ns := "mgd-bootstrap-retry"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
-		makeCertSecret(ctx, "nomad-tls", ns)
+		makeCertSecret(ctx, ns)
 		nc := minimalCluster("retry", ns)
 		Expect(k8s.Create(ctx, nc)).To(Succeed())
 
@@ -350,7 +350,7 @@ var _ = Describe("Managed provisioning", func() {
 		ctx := context.Background()
 		ns := "mgd-members"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
-		makeCertSecret(ctx, "nomad-tls", ns)
+		makeCertSecret(ctx, ns)
 		nc := minimalCluster("members", ns)
 		Expect(k8s.Create(ctx, nc)).To(Succeed())
 
@@ -388,7 +388,7 @@ var _ = Describe("Managed provisioning", func() {
 		ctx := context.Background()
 		ns := "mgd-members-err"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
-		makeCertSecret(ctx, "nomad-tls", ns)
+		makeCertSecret(ctx, ns)
 		nc := minimalCluster("memberr", ns)
 		Expect(k8s.Create(ctx, nc)).To(Succeed())
 
@@ -413,7 +413,7 @@ var _ = Describe("advertise.rpc drift guard", func() {
 	// returning the reconciler (with a fake recorder) for a follow-up drift.
 	driveToReady := func(ctx context.Context, name, ns, addrA string, servers int32, rpcPorts []int32) (*NomadClusterReconciler, *record.FakeRecorder) {
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
-		makeCertSecret(ctx, "nomad-tls", ns)
+		makeCertSecret(ctx, ns)
 		nc := minimalCluster(name, ns)
 		nc.Spec.Servers = servers
 		nc.Spec.ExternalAccess.Gateway.RPCPorts = rpcPorts

@@ -181,3 +181,28 @@ func TestSingleServerStatefulSetReplicas(t *testing.T) {
 		t.Errorf("replicas = %d, want 1", *ss.Spec.Replicas)
 	}
 }
+
+// TestGossipMountedOnlyOnInitContainer guards D3: the gossip Secret's encrypt
+// key is only needed by the init container's overlay.hcl generation (it reads
+// /nomad/gossip/key once, at startup); mounting it on the long-lived main
+// container too is a redundant secret exposure with no consumer.
+func TestGossipMountedOnlyOnInitContainer(t *testing.T) {
+	nc := minimalCluster("prod", "wl")
+	sts := buildStatefulSet(nc, "hash")
+	main := sts.Spec.Template.Spec.Containers[0]
+	for _, m := range main.VolumeMounts {
+		if m.MountPath == "/nomad/gossip" {
+			t.Errorf("main container must not mount gossip at /nomad/gossip")
+		}
+	}
+	init := sts.Spec.Template.Spec.InitContainers[0]
+	found := false
+	for _, m := range init.VolumeMounts {
+		if m.MountPath == "/nomad/gossip" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("init container must still mount gossip at /nomad/gossip")
+	}
+}

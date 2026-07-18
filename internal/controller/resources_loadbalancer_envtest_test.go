@@ -19,7 +19,7 @@ var _ = Describe("LoadBalancer external-access mode", func() {
 		ctx := context.Background()
 		ns := "lbmode"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
-		makeCertSecret(ctx, "nomad-tls", ns)
+		makeCertSecret(ctx, ns)
 		nc := lbCluster("edge", ns)
 		Expect(k8s.Create(ctx, nc)).To(Succeed())
 

@@ -59,9 +59,11 @@ var _ = Describe("gossip key", func() {
 	})
 })
 
-func makeCertSecret(ctx context.Context, name, ns string) {
+const testCertSecretName = "nomad-tls"
+
+func makeCertSecret(ctx context.Context, ns string) {
 	s := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: testCertSecretName, Namespace: ns},
 		Type:       corev1.SecretTypeTLS,
 		Data:       map[string][]byte{"tls.crt": []byte("x"), "tls.key": []byte("y"), "ca.crt": []byte("z")},
 	}
@@ -142,7 +144,7 @@ var _ = Describe("teardown retention", func() {
 		ctx := context.Background()
 		ns := "teardown"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
-		makeCertSecret(ctx, "nomad-tls", ns)
+		makeCertSecret(ctx, ns)
 		nc := minimalCluster("prod", ns)
 		Expect(k8s.Create(ctx, nc)).To(Succeed())
 		fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}

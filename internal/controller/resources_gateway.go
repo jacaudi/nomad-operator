@@ -27,13 +27,14 @@ func ptrPortNumber(p int32) *gwapiv1.PortNumber { return new(gwapiv1.PortNumber(
 // listener port on the same Gateway IP).
 func buildManagedGateway(nc *nomadv1alpha1.NomadCluster) *gwapiv1.Gateway {
 	n := names(nc)
-	listeners := []gwapiv1.Listener{{
+	listeners := make([]gwapiv1.Listener, 0, 1+len(nc.Spec.ExternalAccess.Gateway.RPCPorts))
+	listeners = append(listeners, gwapiv1.Listener{
 		Name:     listenerNameHTTP,
 		Port:     gwapiv1.PortNumber(portHTTP),
 		Protocol: gwapiv1.TLSProtocolType,
 		Hostname: ptrHostname(nc.Spec.ExternalAccess.Gateway.HTTPHostname),
 		TLS:      &gwapiv1.GatewayTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)},
-	}}
+	})
 	for ordinal, p := range nc.Spec.ExternalAccess.Gateway.RPCPorts {
 		listeners = append(listeners, gwapiv1.Listener{
 			Name:     gwapiv1.SectionName(listenerNameRPC(ordinal)),

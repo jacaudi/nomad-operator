@@ -209,7 +209,6 @@ func buildStatefulSet(nc *nomadv1alpha1.NomadCluster, configHash string) *appsv1
 							{Name: "rendered", MountPath: "/nomad/config"},
 							{Name: "data", MountPath: "/var/lib/nomad"},
 							{Name: "tls", MountPath: "/nomad/tls", ReadOnly: true},
-							{Name: "gossip", MountPath: "/nomad/gossip", ReadOnly: true},
 						},
 					}},
 					Volumes: []corev1.Volume{

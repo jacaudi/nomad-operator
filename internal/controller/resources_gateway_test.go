@@ -126,7 +126,7 @@ var _ = Describe("Existing gateway mode", func() {
 		ctx := context.Background()
 		ns := "exist"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
-		makeCertSecret(ctx, "nomad-tls", ns)
+		makeCertSecret(ctx, ns)
 		// Pre-create a shared Gateway with the required listeners + an address.
 		shared := sharedGatewayFixture(ns, []int32{14647, 24647, 34647})
 		Expect(k8s.Create(ctx, shared)).To(Succeed())
@@ -157,7 +157,7 @@ var _ = Describe("Existing gateway mode", func() {
 		ctx := context.Background()
 		ns := "existbad"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
-		makeCertSecret(ctx, "nomad-tls", ns)
+		makeCertSecret(ctx, ns)
 		shared := sharedGatewayFixture(ns, []int32{14647}) // missing 24647, 34647
 		Expect(k8s.Create(ctx, shared)).To(Succeed())
 		shared.Status.Addresses = []gwapiv1.GatewayStatusAddress{{Value: "10.0.0.9"}}
@@ -177,7 +177,7 @@ var _ = Describe("Existing gateway mode", func() {
 		ctx := context.Background()
 		ns := "existwrongname"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
-		makeCertSecret(ctx, "nomad-tls", ns)
+		makeCertSecret(ctx, ns)
 		// Right ports/protocols throughout, but the ordinal-0 RPC listener is
 		// named "custom-rpc-0" instead of the operator's "rpc-0" convention
 		// that buildTCPRoutes' parentRef.SectionName actually attaches to.
@@ -210,7 +210,7 @@ var _ = Describe("Existing gateway mode", func() {
 		crNs := "tenant-a"
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: gwNs}})).To(Succeed())
 		Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: crNs}})).To(Succeed())
-		makeCertSecret(ctx, "nomad-tls", crNs)
+		makeCertSecret(ctx, crNs)
 
 		// Same fixture shape as sharedGatewayFixture, but AllowedRoutes left at
 		// the Core default (From: Same) instead of admitting all namespaces —
