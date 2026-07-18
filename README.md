@@ -284,7 +284,5 @@ Contributor conventions and the codebase map are in
 
 ## License
 
-Apache License 2.0 (`SPDX-License-Identifier: Apache-2.0`).
-
-> A top-level `LICENSE` file has not yet been committed — add the canonical
-> Apache-2.0 text to complete the declaration.
+Apache License 2.0 (`SPDX-License-Identifier: Apache-2.0`) — see
+[`LICENSE`](LICENSE). Copyright 2026 jacaudi.
