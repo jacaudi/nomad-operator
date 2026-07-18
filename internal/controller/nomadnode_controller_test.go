@@ -269,6 +269,53 @@ var _ = Describe("NomadNode reflector: drive", func() {
 			To(BeFalse(), "a matching adopted drain must not false-fire the signal")
 	})
 
+	It("clears DrainSpecPendingRestart (True->False) when the edit is reverted mid-drain", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-drain-revert-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+		// spec wants 30m; Nomad reports the in-flight drain at 1h -> diverged.
+		nn := &nomadv1alpha1.NomadNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "dr1", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadNodeSpec{
+				ClusterRef: nomadv1alpha1.NodeReference{Name: nc.Name}, NodeName: "dr1",
+				Drain: &nomadv1alpha1.NodeDrainSpec{Deadline: &metav1.Duration{Duration: 30 * time.Minute}},
+			},
+		}
+		Expect(k8s.Create(ctx, nn)).To(Succeed())
+
+		fake := &fakeNodeOps{
+			list: []*api.NodeListStub{{ID: "dr1id", Name: "dr1", Status: "ready", SchedulingEligibility: "ineligible", Drain: true}},
+			info: map[string]*api.Node{
+				"dr1id": {DrainStrategy: &api.DrainStrategy{DrainSpec: api.DrainSpec{Deadline: time.Hour}}},
+			},
+		}
+		r := &NomadNodeReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeNodeFactory(fake)}
+		key := types.NamespacedName{Name: nc.Name, Namespace: ns.Name}
+
+		// First pass: diverged edit -> condition True.
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+		got := &nomadv1alpha1.NomadNode{}
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "dr1", Namespace: ns.Name}, got)).To(Succeed())
+		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, nomadv1alpha1.NomadNodeCondDrainSpecPendingRestart)).
+			To(BeTrue(), "diverged edit must first set the condition True")
+
+		// Revert the spec to match the in-flight drain (1h); this bumps the generation.
+		got.Spec.Drain.Deadline = &metav1.Duration{Duration: time.Hour}
+		Expect(k8s.Update(ctx, got)).To(Succeed())
+
+		// Second pass: spec now matches live -> condition transitions to False/InSync.
+		_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fake.drainCalls).To(BeEmpty(), "revert-while-draining must not re-issue")
+		got = &nomadv1alpha1.NomadNode{}
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "dr1", Namespace: ns.Name}, got)).To(Succeed())
+		cond := meta.FindStatusCondition(got.Status.Conditions, nomadv1alpha1.NomadNodeCondDrainSpecPendingRestart)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse), "reverted spec must clear the pending-restart signal")
+		Expect(cond.Reason).To(Equal(nomadv1alpha1.ReasonDrainSpecInSync))
+	})
+
 	It("cancels a drain when spec.drain is removed", func(ctx SpecContext) {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nn-cancel-"}}
 		Expect(k8s.Create(ctx, ns)).To(Succeed())
