@@ -71,21 +71,37 @@ Verify per the [join backbone](README.md#5-verify-the-join).
 
 ## 5. Sample job
 
-```hcl
-job "hello-container" {
-  group "g" {
-    task "nginx" {
-      driver = "container"          # <- task driver name
-      config {
-        image = "nginx:latest"
-        ports = ["http"]
-        init  = true
-        # rosetta = true            # run x86 images via Rosetta
-      }
-      resources { cpu = 1000; memory = 128 }
-    }
-  }
-}
+Author the job as a `NomadJob` custom resource and apply it to your
+**Kubernetes** cluster — the operator registers it with Nomad:
+
+```yaml
+apiVersion: nomad.operator.io/v1alpha1
+kind: NomadJob
+metadata:
+  name: hello-container
+spec:
+  clusterRef:
+    name: nomad                    # the NomadCluster in this namespace
+  jobID: hello-container
+  job:                             # the native Nomad jobspec, as YAML
+    datacenters:
+      - dc1
+    taskGroups:
+      - name: web
+        tasks:
+          - name: nginx
+            driver: container      # <- task driver name
+            config:
+              image: nginx:latest
+              init: true
+              # rosetta: true      # run x86 images via Rosetta
+            resources:
+              cpu: 1000
+              memoryMB: 128
+```
+
+```bash
+kubectl apply -f hello-container.yaml
 ```
 
 ## Gotchas

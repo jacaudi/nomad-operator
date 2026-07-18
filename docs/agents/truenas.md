@@ -37,7 +37,9 @@ Compose spec (or run `docker compose` on the host):
 services:
   nomad-client:
     image: hashicorp/nomad:2.0.4
-    command: ["agent", "-config=/etc/nomad.d"]
+    command:
+      - agent
+      - -config=/etc/nomad.d
     network_mode: host            # Nomad needs real host networking for ports/fingerprinting
     pid: host
     privileged: true              # required for cgroup/fingerprinting (see Security)
@@ -76,19 +78,35 @@ kubectl get nomadnode                                   # a NomadNode CR appears
 
 ## 4. Sample job
 
-```hcl
-job "hello-docker" {
-  group "g" {
-    task "web" {
-      driver = "docker"
-      config {
-        image = "nginx:latest"
-        ports = ["http"]
-      }
-      resources { cpu = 200; memory = 128 }
-    }
-  }
-}
+Author the job as a `NomadJob` custom resource and apply it to your
+**Kubernetes** cluster — the operator registers it with Nomad:
+
+```yaml
+apiVersion: nomad.operator.io/v1alpha1
+kind: NomadJob
+metadata:
+  name: hello-docker
+spec:
+  clusterRef:
+    name: nomad                    # the NomadCluster in this namespace
+  jobID: hello-docker
+  job:                             # the native Nomad jobspec, as YAML
+    datacenters:
+      - dc1
+    taskGroups:
+      - name: web
+        tasks:
+          - name: web
+            driver: docker
+            config:
+              image: nginx:latest
+            resources:
+              cpu: 200
+              memoryMB: 128
+```
+
+```bash
+kubectl apply -f hello-docker.yaml
 ```
 
 ## Security — read this

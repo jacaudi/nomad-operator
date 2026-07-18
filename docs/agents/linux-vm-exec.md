@@ -50,21 +50,39 @@ Verify per the [join backbone](README.md#5-verify-the-join).
 
 ## 4. Sample job
 
-`command` is an absolute path (resolved inside the chroot); `args` is a list:
+`command` is an absolute path (resolved inside the chroot); `args` is a list.
+Author the job as a `NomadJob` custom resource and apply it to your
+**Kubernetes** cluster — the operator registers it with Nomad:
 
-```hcl
-job "hello-exec" {
-  group "g" {
-    task "server" {
-      driver = "exec"
-      config {
-        command = "/bin/sh"
-        args    = ["-c", "echo hello from exec && sleep 3600"]
-      }
-      resources { cpu = 200; memory = 64 }
-    }
-  }
-}
+```yaml
+apiVersion: nomad.operator.io/v1alpha1
+kind: NomadJob
+metadata:
+  name: hello-exec
+spec:
+  clusterRef:
+    name: nomad                    # the NomadCluster in this namespace
+  jobID: hello-exec
+  job:                             # the native Nomad jobspec, as YAML
+    datacenters:
+      - dc1
+    taskGroups:
+      - name: app
+        tasks:
+          - name: server
+            driver: exec
+            config:
+              command: /bin/sh
+              args:
+                - -c
+                - echo hello from exec && sleep 3600
+            resources:
+              cpu: 200
+              memoryMB: 64
+```
+
+```bash
+kubectl apply -f hello-exec.yaml
 ```
 
 ## Gotchas

@@ -63,27 +63,45 @@ Then verify per the [join backbone](README.md#5-verify-the-join):
 ## 5. Sample job
 
 The `nspawn` driver runs **machine images**, not OCI/Docker images — provision
-those on the host (e.g. `debootstrap`, `machinectl pull-tar`). A single-command
-task:
+those on the host (e.g. `debootstrap`, `machinectl pull-tar`). Author the job as
+a `NomadJob` custom resource and apply it to your **Kubernetes** cluster — the
+operator registers it with Nomad:
 
-```hcl
-job "hello-nspawn" {
-  group "g" {
-    task "debian" {
-      driver = "nspawn"
-      config {
-        image       = "/var/lib/machines/debian"   # an nspawn machine image
-        resolv_conf = "copy-host"
-        command     = ["/bin/sh", "-c", "echo hello from nspawn && sleep 3600"]
-      }
-      resources { cpu = 200; memory = 128 }
-    }
-  }
-}
+```yaml
+apiVersion: nomad.operator.io/v1alpha1
+kind: NomadJob
+metadata:
+  name: hello-nspawn
+spec:
+  clusterRef:
+    name: nomad                    # the NomadCluster in this namespace
+  jobID: hello-nspawn
+  job:                             # the native Nomad jobspec, as YAML
+    datacenters:
+      - dc1
+    taskGroups:
+      - name: app
+        tasks:
+          - name: debian
+            driver: nspawn
+            config:
+              image: /var/lib/machines/debian   # an nspawn machine image
+              resolv_conf: copy-host
+              command:
+                - /bin/sh
+                - -c
+                - echo hello from nspawn && sleep 3600
+            resources:
+              cpu: 200
+              memoryMB: 128
 ```
 
-Boot a full init system instead of a single command with `boot = true` (mutually
-exclusive with `command`).
+```bash
+kubectl apply -f hello-nspawn.yaml
+```
+
+Boot a full init system instead of a single command with `boot: true` in
+`config` (mutually exclusive with `command`).
 
 ## Gotchas
 

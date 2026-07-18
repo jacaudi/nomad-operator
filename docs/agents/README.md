@@ -73,10 +73,15 @@ metadata:
   name: nomad-client-edge01
 spec:
   secretName: nomad-client-edge01-tls
-  issuerRef: { name: <your-nomad-ca-issuer>, kind: Issuer }   # the same CA as the server cert
+  issuerRef:
+    name: <your-nomad-ca-issuer>        # the same CA as the server cert
+    kind: Issuer
   commonName: client.global.nomad
-  dnsNames: ["client.global.nomad"]     # role SAN; region defaults to "global"
-  usages: ["client auth", "server auth"]
+  dnsNames:                             # role SAN; region defaults to "global"
+    - client.global.nomad
+  usages:
+    - client auth
+    - server auth
 ```
 
 Then extract the leaf onto the edge host:

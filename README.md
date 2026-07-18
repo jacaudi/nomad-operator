@@ -17,6 +17,14 @@ over mTLS. See [Edge agents](docs/agents/README.md).
 > **Status:** all five custom resources are implemented and tested against
 > **Nomad v2.0.4**. The API group is `nomad.operator.io/v1alpha1`.
 
+> [!WARNING]
+> **Agentically generated.** This codebase was produced through agentic,
+> spec-driven development: each feature began as a written design and
+> implementation spec, then a coding agent executed the plan under human
+> review. Tests, code review, and CI gates apply as they would for any
+> project, but the authorship pattern is not a single human contributor —
+> keep that in mind when evaluating fit for your environment.
+
 ## Table of contents
 
 - [Why](#why)
@@ -75,11 +83,24 @@ The operator reconciles five resources. See
 - **Gateway API CRDs** — the manager watches `Gateway`/`TCPRoute`/`TLSRoute`, so
   these must be installed even if you only use LoadBalancer mode. Bundled copies
   are in [`config/crd/gateway-api/`](config/crd/gateway-api/).
-- **[cert-manager](https://cert-manager.io/)** (recommended) to issue the Nomad
-  mTLS material — or any process that can produce a Secret with `tls.crt`,
-  `tls.key`, and `ca.crt`.
+- An mTLS certificate **Secret** for the servers (`tls.crt`, `tls.key`,
+  `ca.crt`) — see the note below on how to produce it.
 - A default `StorageClass` for the servers' persistent volumes.
 - To build the image yourself: Go 1.26+ and Docker.
+
+> [!NOTE]
+> The operator **consumes** the certificate Secret; it does not mint
+> certificates. Two common ways to produce and keep it in sync:
+>
+> - **[cert-manager](https://cert-manager.io/)** — issue the cert in-cluster from
+>   an `Issuer`/CA (Kubernetes-native PKI).
+> - **[External Secrets Operator](https://external-secrets.io/)** — sync a cert
+>   minted and stored in an external system (e.g. Vault PKI, a cloud secrets
+>   manager) into the Kubernetes Secret.
+>
+> Either way, the Secret needs `tls.crt`, `tls.key`, `ca.crt`, and its SANs must
+> include `server.<region>.nomad`, `client.<region>.nomad`, the gateway
+> `httpHostname` (Gateway mode), `localhost`, and `127.0.0.1`.
 
 ### Install the operator
 
@@ -111,15 +132,20 @@ metadata:
   name: nomad-server-tls
 spec:
   secretName: nomad-server-tls               # ← referenced by the cluster below
-  issuerRef: { name: nomad-ca-issuer, kind: Issuer }
+  issuerRef:
+    name: nomad-ca-issuer
+    kind: Issuer
   commonName: server.global.nomad
   dnsNames:                                  # region defaults to "global"
     - server.global.nomad
     - client.global.nomad
     - nomad.example.com                      # = gateway.httpHostname
     - localhost
-  ipAddresses: ["127.0.0.1"]
-  usages: ["server auth", "client auth"]
+  ipAddresses:
+    - 127.0.0.1
+  usages:
+    - server auth
+    - client auth
 ```
 
 Then the cluster — a 3-server HA control plane exposed through the Gateway API:
@@ -133,7 +159,8 @@ spec:
   image: hashicorp/nomad:2.0.4
   servers: 3                       # 1, 3, or 5
   region: global
-  datacenters: [dc1]
+  datacenters:
+    - dc1
   storage:
     size: 10Gi
     # storageClassName: fast-ssd   # omit to use the default
@@ -144,7 +171,10 @@ spec:
     gateway:
       mode: Managed                # operator creates & owns the Gateway
       httpHostname: nomad.example.com
-      rpcPorts: [14647, 24647, 34647]   # one RPC listener per server
+      rpcPorts:                         # one RPC listener per server
+        - 14647
+        - 24647
+        - 34647
 ```
 
 ```bash
@@ -178,15 +208,19 @@ kind: NomadJob
 metadata:
   name: hello
 spec:
+  clusterRef:
+    name: nomad                    # the NomadCluster in this namespace
   jobID: hello
   job:                             # the native Nomad job spec, in YAML
-    datacenters: [dc1]
+    datacenters:
+      - dc1
     taskGroups:
       - name: web
         tasks:
           - name: server
             driver: docker
-            config: { image: nginx:latest }
+            config:
+              image: nginx:latest
 ```
 
 See the per-resource [runbooks](docs/runbooks/) for the full field reference.
