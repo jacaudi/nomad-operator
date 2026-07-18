@@ -20,7 +20,7 @@
 
 **Tech Stack:** Go 1.26.4, kubebuilder v4, controller-runtime v0.23.3, k8s v0.35.0, `github.com/hashicorp/nomad/api` pinned at `v0.0.0-20260707172059-5b83b133998a` (== v2.0.4), envtest, table-driven stdlib `testing`.
 
-**Design:** `docs/designs/2026-07-13-nomadpool-design.md` (amended after Fable SGE review).
+**Design:** `docs/development/designs/2026-07-13-nomadpool-design.md` (amended after Fable SGE review).
 
 ## Global Constraints
 

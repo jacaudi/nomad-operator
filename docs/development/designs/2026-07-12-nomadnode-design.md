@@ -42,7 +42,7 @@ All confirmed against `github.com/hashicorp/nomad/api` at the pinned commit (`5b
 
 ### 1.3 Retiring ripsheet W5 (the "node introduction status" item is VOID)
 
-`docs/design/idea.md` W5 asks to surface a Nomad 2.0 "node introduction/identity" *status* into `NomadNodeStatus.Status`. Verified against the pinned `api`: node "introduction/identity" in 2.0 is `Nodes().Identity().Get/Renew` — a **JWT node-identity token** issued and renewed by the ACL/auth subsystem — **not** a `Node.Status` lifecycle value. There is no pending-introduction status to map. W5's premise is retired: `NomadNode` mirrors the *real* status axis (§1.2) and nothing bogus. The `nomadnode_reflector.go` filename W5 anticipated survives in spirit as this slice's reflector loop.
+`docs/development/design/idea.md` W5 asks to surface a Nomad 2.0 "node introduction/identity" *status* into `NomadNodeStatus.Status`. Verified against the pinned `api`: node "introduction/identity" in 2.0 is `Nodes().Identity().Get/Renew` — a **JWT node-identity token** issued and renewed by the ACL/auth subsystem — **not** a `Node.Status` lifecycle value. There is no pending-introduction status to map. W5's premise is retired: `NomadNode` mirrors the *real* status axis (§1.2) and nothing bogus. The `nomadnode_reflector.go` filename W5 anticipated survives in spirit as this slice's reflector loop.
 
 ---
 

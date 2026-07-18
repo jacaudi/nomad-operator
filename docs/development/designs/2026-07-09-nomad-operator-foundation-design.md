@@ -6,7 +6,7 @@
 | **This document** | Design for the **Foundation slice** (slice 1 of 6) — the buildable, verifiable skeleton every later slice builds on |
 | **Target runtime** | Nomad **v2.0.4**; K8s 1.28+; Go **1.26.4** |
 | **Status** | Approved 2026-07-09 — ready for implementation plan |
-| **Supersedes premises in** | `docs/design/idea.md` (the ripsheet) — see Appendix A for corrections |
+| **Supersedes premises in** | `docs/development/design/idea.md` (the ripsheet) — see Appendix A for corrections |
 
 ---
 
@@ -171,7 +171,7 @@ These are carried forward for slices 3–5; Foundation's dev-agent test starts c
 
 ---
 
-## Appendix A — Ripsheet (`docs/design/idea.md`) corrections, established empirically
+## Appendix A — Ripsheet (`docs/development/design/idea.md`) corrections, established empirically
 
 Verified by reading the real `api` source at v2.0.4 (`5b83b133998a`) and diffing against v1.11.3.
 

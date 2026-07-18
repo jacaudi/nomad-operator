@@ -124,7 +124,7 @@ Auto-detecting the wedge and rewriting `peers.json` / triggering raft recovery i
    - **Preserve state** — surgical `peers.json` recovery: write `/var/lib/nomad/server/raft/peers.json` on the pod with the current node-id + the *new* advertised address, restart the agent (Nomad consumes and deletes `peers.json` on boot).
    - **Simplest (dev-acceptable)** — delete the server pod's PVC and let the StatefulSet re-bootstrap a clean single-node raft at the new address (loses Nomad state; acceptable for the non-HA/dev tier).
    - Guidance: prefer HA (`servers: 3`) for any cluster where address drift is plausible, since it self-heals.
-3. **`docs/known-issues.md`** — correct/close the prior "servers:1 does not survive restart" entry: it was a bare-kind harness artifact (non-durable patched ingress IP), not a shipping defect; the real, narrow failure mode is `servers: 1` + address drift, now covered by the runbook + drift guard.
+3. **`docs/development/issues/known-issues.md`** — correct/close the prior "servers:1 does not survive restart" entry: it was a bare-kind harness artifact (non-durable patched ingress IP), not a shipping defect; the real, narrow failure mode is `servers: 1` + address drift, now covered by the runbook + drift guard.
 
 ---
 

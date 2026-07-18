@@ -11,9 +11,9 @@ This is slice **6c** of the hardening slice (6a = `NomadNamespace`, done+merged;
 
 Every item below was re-verified against current `main` (design committed at `5104f66`; code HEAD `e429a01`), not taken from memory — **except #7, whose grounding was stale and is corrected in the amendment (already implemented)**:
 
-- The **slice-2 backlog** is the durable, authoritative record in `docs/known-issues.md` (#1 already Resolved by 6b; FR-1 servers:1 already shipped; #2–#7 remain).
+- The **slice-2 backlog** is the durable, authoritative record in `docs/development/issues/known-issues.md` (#1 already Resolved by 6b; FR-1 servers:1 already shipped; #2–#7 remain).
 - The **slice-3 Minors + test gaps** and the **6a deferrals** lived only in worktree ledgers (now gone); each was re-grounded against current code via a read-only inventory pass, which produced the `file:line` anchors and current-behavior notes cited throughout. Two findings changed the triage: **L-2** is currently *intended, test-asserted* behavior (not a plain bug), and the **6a finalize reserved-guard is a phantom** (no such guard exists in the finalize path).
-- The **6b Minors** are recorded in `docs/designs/2026-07-17-nomadcluster-restart-resilience-design.md` and the slice-6b whole-branch review.
+- The **6b Minors** are recorded in `docs/development/designs/2026-07-17-nomadcluster-restart-resilience-design.md` and the slice-6b whole-branch review.
 
 User scope decisions folded in (2026-07-17): (a) **comprehensive close-out** — every item to terminal state; (b) 6b Minor 2 → **root-cause fix** (persist `ExternalAddress`), not a dedup marker; (c) the three borderline items **L-2, #6, #7 were all to be fixed in 6c** — but see the amendment: **#7 was already implemented on `main`**, so it collapses to a Resolved disposition.
 
@@ -104,7 +104,7 @@ The only remaining *fix* here is **#6**. **#7 was already implemented on `main`*
 
 ### #7 — watch the referenced Gateway (Existing mode) — **RESOLVED (C-1), no fix work**
 - **Status:** already implemented on current `main` by `fbbf66e` ("fix(controller): watch referenced Gateway + own applied children"), an ancestor of the code HEAD: `Watches(&gwapiv1.Gateway{}, handler.EnqueueRequestsFromMapFunc(r.gatewayToClusters))` (`nomadcluster_controller.go:293`), the `gatewayToClusters` mapping resolving a Gateway → Existing-mode referencing NomadClusters with Managed excluded (`:249-267`), and unit coverage in `gatewaywatch_test.go`. My original grounding for #7 was **stale** — the review caught it.
-- **Disposition:** mark `docs/known-issues.md` #7 **Resolved** (cite `fbbf66e`) as part of the Group F/docs task. **Optional residual (only added value):** an envtest that asserts end-to-end enqueue through the wired manager (the existing test is a unit test of the map func, not a wired-watch envtest). Include it if cheap; it is not required for terminal disposition.
+- **Disposition:** mark `docs/development/issues/known-issues.md` #7 **Resolved** (cite `fbbf66e`) as part of the Group F/docs task. **Optional residual (only added value):** an envtest that asserts end-to-end enqueue through the wired manager (the existing test is a unit test of the map func, not a wired-watch envtest). Include it if cheap; it is not required for terminal disposition.
 
 ---
 
@@ -120,7 +120,7 @@ The only remaining *fix* here is **#6**. **#7 was already implemented on `main`*
 
 ## 7. Group F — Won't-fix (documented, no code)
 
-These three reach terminal state as **documented won't-fix** — not out of expedience, but because fixing each would be *wrong*. Each gets a `docs/known-issues.md` entry recording the rationale (portable to a GitHub issue-close comment on publish).
+These three reach terminal state as **documented won't-fix** — not out of expedience, but because fixing each would be *wrong*. Each gets a `docs/development/issues/known-issues.md` entry recording the rationale (portable to a GitHub issue-close comment on publish).
 
 - **6b Minor 3 — empty `ServerHealth` read keeps prior `Members`/`Quorum`.** This is the *intended* keep-prior-status behavior from restart-resilience design §6.3, and is near-impossible to hit while a leader exists (the read is placed after the leader gate). "Fixing" it would contradict a shipped design decision. **Disposition: won't-fix, by design.**
 - **6a finalize reserved-name guard — phantom.** The inventory confirmed there is **no** reserved-name guard in the finalize path (`finalizeNamespace:192-242`) to be "unreachable." The only reserved guard is in `reconcileNamespace:130-134`, it is intentional defense-in-depth, and CEL (`namespaceName != 'default'` at `nomadnamespace_types.go:59`, immutable) makes it redundant-by-design. There is nothing to fix; the existing guard is correct as belt-and-suspenders. **Disposition: won't-fix, no code exists to change.**
@@ -172,7 +172,7 @@ The build/regen gate for every code task: `make manifests generate fmt vet && ma
 
 ## 11. The go-public gate
 
-The pinned project decision is that the repository stays **local-only until the deferred backlog is cleared** — no push, no remote, no repo creation until then. 6c is the slice that clears it: on completion, every backlog item is fixed, tested, or documented-won't-fix, and `docs/known-issues.md` reflects reality (resolved entries closed, won't-fix entries carrying rationale, #6 fixed and #7 marked resolved).
+The pinned project decision is that the repository stays **local-only until the deferred backlog is cleared** — no push, no remote, no repo creation until then. 6c is the slice that clears it: on completion, every backlog item is fixed, tested, or documented-won't-fix, and `docs/development/issues/known-issues.md` reflects reality (resolved entries closed, won't-fix entries carrying rationale, #6 fixed and #7 marked resolved).
 
 At that point the gate is satisfied — but publishing is still an **explicit, separate decision the user makes**, not an automatic consequence of merging 6c. This design does not authorize any outward-facing action. When the user chooses to publish, the remaining known-issues entries (if any are consciously kept as enhancements) become filed GitHub issues verbatim, as their preamble intends.
 

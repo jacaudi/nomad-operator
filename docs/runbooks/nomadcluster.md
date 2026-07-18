@@ -1,7 +1,7 @@
 # NomadCluster operator runbook
 
 Operator procedures for the `NomadCluster` CRD (slice 2, "control plane"). See
-`docs/designs/2026-07-10-nomadcluster-control-plane-design.md` for the full
+`docs/development/designs/2026-07-10-nomadcluster-control-plane-design.md` for the full
 design; this runbook covers deploy-time prerequisites, manual verification
 steps that are not automated, and incident procedures.
 
@@ -479,7 +479,7 @@ address live on a Service/Gateway object rather than a pod, that address is
 stable across a normal backend-pod restart. Raft integrity therefore depends
 on one thing: **`advertise.rpc` staying the same across a restart.** This was
 verified directly against a live Nomad v2.0.4 harness (design
-`docs/designs/2026-07-17-nomadcluster-restart-resilience-design.md` §2):
+`docs/development/designs/2026-07-17-nomadcluster-restart-resilience-design.md` §2):
 
 | Config | Restart, **stable** `advertise.rpc` | Restart, **drifted** `advertise.rpc` |
 | --- | --- | --- |

@@ -15,7 +15,7 @@
 
 **Goal:** Drive every deferred item accumulated across slices 2–6b to a terminal disposition (fix / test / documented won't-fix), and prove the full live integration suite green — clearing the deferred backlog so the repository can be published.
 
-**Architecture:** Localized reconciler fixes across three CRDs (NomadNode, NomadCluster), plus test-gap backfill, a batched cleanup, and documentation. No new CRDs, no new spec surface, no new Nomad API dependency. Source of truth: `docs/designs/2026-07-17-slice-6c-hardening-design.md` (SGE-amended).
+**Architecture:** Localized reconciler fixes across three CRDs (NomadNode, NomadCluster), plus test-gap backfill, a batched cleanup, and documentation. No new CRDs, no new spec surface, no new Nomad API dependency. Source of truth: `docs/development/designs/2026-07-17-slice-6c-hardening-design.md` (SGE-amended).
 
 **Tech Stack:** Go 1.26, controller-runtime v0.23.3, kubebuilder v4, k8s v0.35.0, HashiCorp Nomad `api` pinned `v0.0.0-20260707172059-5b83b133998a` (== v2.0.4). Tests: Ginkgo v2 + Gomega on envtest.
 
@@ -1252,12 +1252,12 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 *Docs only.* Records terminal dispositions so nothing is silently dropped.
 
 **Files:**
-- Modify: `docs/known-issues.md`
+- Modify: `docs/development/issues/known-issues.md`
 - Modify: `docs/runbooks/nomadcluster.md` (only if an entry references it)
 
 - [ ] **Step 1: Mark the fixed slice-2 items Resolved**
 
-In `docs/known-issues.md`, add a `**Status: Resolved (2026-07-17, slice 6c).**` line (mirroring #1's format) to:
+In `docs/development/issues/known-issues.md`, add a `**Status: Resolved (2026-07-17, slice 6c).**` line (mirroring #1's format) to:
 - **#2** (lint prealloc/unparam) — Task 8.
 - **#3** (unused `NomadOps` methods) — Task 8 (interface trimmed; concrete methods + pins retained).
 - **#4** (redundant gossip mount) — Task 8.
@@ -1267,7 +1267,7 @@ In `docs/known-issues.md`, add a `**Status: Resolved (2026-07-17, slice 6c).**` 
 
 - [ ] **Step 2: Add the won't-fix (documented) entries**
 
-Append a "Won't-fix (by design)" section to `docs/known-issues.md` with three entries + rationale:
+Append a "Won't-fix (by design)" section to `docs/development/issues/known-issues.md` with three entries + rationale:
 - **6b Minor 3** — empty `ServerHealth` read keeps prior `Members`/`Quorum`. Intended keep-prior-status per restart-resilience design §6.3; near-impossible while a leader exists. Won't-fix.
 - **6a finalize reserved-name guard** — phantom: no reserved-name guard exists in `finalizeNamespace`; the `reconcileNamespace` guard is intentional defense-in-depth and CEL-redundant (`namespaceName != 'default'`, immutable). Nothing to fix.
 - **6a conflict-then-delete shared-namespace** — self-heals (loser re-registers once the winner's finalizer deletes the shared namespace); deliberately mirrors merged `NomadPool`. Won't-fix for parity; if the transient window is ever unacceptable, change **both** CRDs together.
@@ -1279,7 +1279,7 @@ Add a short "Integration coverage" note (in `known-issues.md` or the runbook): `
 - [ ] **Step 4: Commit**
 
 ```bash
-git add docs/known-issues.md docs/runbooks/nomadcluster.md
+git add docs/development/issues/known-issues.md docs/runbooks/nomadcluster.md
 git commit -S -m "docs(6c): reconcile known-issues (resolve #2-#7, record won't-fix rationale + live evidence)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"

@@ -7,7 +7,7 @@
 | **Target runtime** | Nomad **v2.0.4**; K8s 1.28+ with Gateway API + Cilium (LBIPAM + Gateway); Go **1.26.4** |
 | **Status** | Approved 2026-07-10; amended 2026-07-10 after an independent sr-go-engineer (Fable) design review — ready for implementation plan |
 | **Review amendments** | Folded review findings: bootstrap-deadlock fix (`podManagementPolicy: Parallel` + `publishNotReadyAddresses`, §3.2); ACL made idempotent via `BootstrapOpts` + Secret-as-source-of-truth + corrected reset runbook (§3.3); config-hash rollout + `rpcPorts` immutable (§3.1/§3.2/§3.7); `httpHostname`/`localhost` cert SANs (§3.3); injectable client factory + Gateway-API experimental-channel CRDs (§3.6/§5/§7); deletion/teardown retention (§3.8); plus minors M2/M4/M5/M8/M9 |
-| **Builds on** | `docs/designs/2026-07-09-nomad-operator-foundation-design.md` (slice 1, merged) — §2 roadmap, §4.2 client seam |
+| **Builds on** | `docs/development/designs/2026-07-09-nomad-operator-foundation-design.md` (slice 1, merged) — §2 roadmap, §4.2 client seam |
 
 ---
 

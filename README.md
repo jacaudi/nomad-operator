@@ -1,135 +1,253 @@
 # nomad-operator
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+**Run a HashiCorp Nomad control plane on Kubernetes, and manage it declaratively
+as Kubernetes resources.**
 
-## Getting Started
+nomad-operator provisions a production-shaped Nomad **server** cluster inside
+Kubernetes — StatefulSet, mTLS, encrypted gossip, ACLs, persistent storage, and
+an external-access surface — from a single `NomadCluster` resource. Once it is
+running, you manage the cluster's day-2 objects (nodes, node pools, namespaces,
+jobs) as native Kubernetes custom resources: write YAML, and the operator
+reconciles Nomad to match.
+
+Your Nomad **clients** (the workers) run wherever you need capacity — a Linux
+box, a VM, a Mac mini, a NAS at the edge — and join the operator-managed servers
+over mTLS. See [Edge agents](docs/agents/README.md).
+
+> **Status:** all five custom resources are implemented and tested against
+> **Nomad v2.0.4**. The API group is `nomad.operator.io/v1alpha1`.
+
+## Table of contents
+
+- [Why](#why)
+- [How it works](#how-it-works)
+- [Getting started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Install the operator](#install-the-operator)
+  - [Create a cluster](#create-a-cluster)
+  - [Attach a client](#attach-a-client)
+  - [Schedule work](#schedule-work)
+- [Custom resources](#custom-resources)
+- [Project layout](#project-layout)
+- [Documentation](#documentation)
+- [Development](#development)
+- [License](#license)
+
+## Why
+
+Nomad is a great scheduler, but running its control plane by hand means managing
+StatefulSets, TLS material, gossip keys, ACL bootstrap, and network exposure
+yourself, then keeping day-2 objects in sync out-of-band. nomad-operator folds
+all of that into the Kubernetes control loop:
+
+- **One resource for the control plane.** `NomadCluster` owns the servers, mTLS,
+  gossip, ACLs, storage, and external access. Scale (1/3/5 servers),
+  certificates, and exposure are spec fields, not runbooks.
+- **Day-2 objects as CRs.** Node pools, namespaces, and jobs are declarative and
+  reconciled; nodes are reflected into Kubernetes so you can drain or cordon them
+  with `kubectl`.
+- **GitOps-friendly.** Everything is YAML under your existing Kubernetes
+  workflow — no separate Nomad provisioning pipeline.
+
+## How it works
+
+The operator reconciles five resources. See
+[Architecture](docs/architecture.md) for the full picture.
+
+- **NomadCluster** — the server control plane: a StatefulSet of Nomad servers
+  with mTLS (from a cert-manager Secret you supply), an operator-generated gossip
+  key, automatic ACL bootstrap, persistent storage, and an external-access
+  surface (Gateway API per-server RPC listeners, or a LoadBalancer for a
+  single-server cluster). It reports `status.phase`, `status.externalAddress`,
+  and `status.quorum`.
+- **NomadNode** — reflects each registered client into a CR so you can manage its
+  `eligible`/`drain` state from Kubernetes. It does not create or destroy
+  machines.
+- **NomadPool / NomadNamespace / NomadJob** — managed-lifecycle resources: you
+  own CRUD, the operator applies them through the Nomad API and cleans up on
+  delete via finalizers.
+
+## Getting started
 
 ### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+- A Kubernetes cluster (v1.30+) and `kubectl`.
+- **Gateway API CRDs** — the manager watches `Gateway`/`TCPRoute`/`TLSRoute`, so
+  these must be installed even if you only use LoadBalancer mode. Bundled copies
+  are in [`config/crd/gateway-api/`](config/crd/gateway-api/).
+- **[cert-manager](https://cert-manager.io/)** (recommended) to issue the Nomad
+  mTLS material — or any process that can produce a Secret with `tls.crt`,
+  `tls.key`, and `ca.crt`.
+- A default `StorageClass` for the servers' persistent volumes.
+- To build the image yourself: Go 1.26+ and Docker.
 
-```sh
-make docker-build docker-push IMG=<some-registry>/nomad-operator:tag
-```
+### Install the operator
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+```bash
+# 1. Gateway API CRDs (required)
+kubectl apply -f config/crd/gateway-api/
 
-**Install the CRDs into the cluster:**
-
-```sh
+# 2. The operator's CRDs
 make install
+
+# 3. The controller (set IMG to your built/pushed image)
+make deploy IMG=<registry>/nomad-operator:latest
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+`make install` applies the `NomadCluster`, `NomadNode`, `NomadPool`,
+`NomadNamespace`, and `NomadJob` CRDs; `make deploy` installs the controller,
+RBAC, and namespace. To build and push the image first: `make docker-build
+docker-push IMG=<registry>/nomad-operator:latest`.
 
-```sh
-make deploy IMG=<some-registry>/nomad-operator:tag
+### Create a cluster
+
+First, a server certificate. The SANs are mandatory — Nomad verifies the
+embedded role/region, not the address:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nomad-server-tls
+spec:
+  secretName: nomad-server-tls               # ← referenced by the cluster below
+  issuerRef: { name: nomad-ca-issuer, kind: Issuer }
+  commonName: server.global.nomad
+  dnsNames:                                  # region defaults to "global"
+    - server.global.nomad
+    - client.global.nomad
+    - nomad.example.com                      # = gateway.httpHostname
+    - localhost
+  ipAddresses: ["127.0.0.1"]
+  usages: ["server auth", "client auth"]
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+Then the cluster — a 3-server HA control plane exposed through the Gateway API:
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
-kubectl apply -k config/samples/
+```yaml
+apiVersion: nomad.operator.io/v1alpha1
+kind: NomadCluster
+metadata:
+  name: nomad
+spec:
+  image: hashicorp/nomad:2.0.4
+  servers: 3                       # 1, 3, or 5
+  region: global
+  datacenters: [dc1]
+  storage:
+    size: 10Gi
+    # storageClassName: fast-ssd   # omit to use the default
+  tls:
+    certSecretRef: nomad-server-tls
+  externalAccess:
+    mode: Gateway
+    gateway:
+      mode: Managed                # operator creates & owns the Gateway
+      httpHostname: nomad.example.com
+      rpcPorts: [14647, 24647, 34647]   # one RPC listener per server
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
+```bash
+kubectl apply -f cluster.yaml
+kubectl get nomadcluster nomad -w        # wait for phase: Ready
+kubectl get nomadcluster nomad -o jsonpath='{.status.externalAddress}'; echo
 ```
 
-**Delete the APIs(CRDs) from the cluster:**
+For a single-server cluster you can use `externalAccess.mode: LoadBalancer`
+instead (one VIP for RPC 4647 + HTTP 4646). See the
+[NomadCluster runbook](docs/runbooks/nomadcluster.md).
 
-```sh
-make uninstall
+### Attach a client
+
+Clients run outside Kubernetes and self-register over mTLS. The
+[Edge agents guide](docs/agents/README.md) covers the shared join procedure plus
+per-platform setup:
+
+- [Linux bare metal (systemd-nspawn)](docs/agents/bare-metal-nspawn.md)
+- [Mac mini (Apple `container`)](docs/agents/mac-mini-container.md)
+- [Linux VM (Isolated Fork/Exec)](docs/agents/linux-vm-exec.md)
+- [TrueNAS SCALE (Docker)](docs/agents/truenas.md)
+
+### Schedule work
+
+With a client registered, apply namespaces, pools, and jobs as CRs:
+
+```yaml
+apiVersion: nomad.operator.io/v1alpha1
+kind: NomadJob
+metadata:
+  name: hello
+spec:
+  jobID: hello
+  job:                             # the native Nomad job spec, in YAML
+    datacenters: [dc1]
+    taskGroups:
+      - name: web
+        tasks:
+          - name: server
+            driver: docker
+            config: { image: nginx:latest }
 ```
 
-**UnDeploy the controller from the cluster:**
+See the per-resource [runbooks](docs/runbooks/) for the full field reference.
 
-```sh
-make undeploy
+## Custom resources
+
+| Kind | Manages | You control | Operator does |
+|------|---------|-------------|---------------|
+| `NomadCluster` | The server control plane | scale, TLS, storage, exposure | provisions & owns everything |
+| `NomadNode` | A registered client | `eligible`, `drain` | reflects status, drives eligibility/drain |
+| `NomadPool` | A node pool | full CRUD | applies via the Nomad API |
+| `NomadNamespace` | A namespace | full CRUD | applies via the Nomad API |
+| `NomadJob` | A job | full CRUD | registers / deregisters (purge on delete) |
+
+## Project layout
+
+```
+cmd/main.go              Manager entry point (registers the controllers)
+api/v1alpha1/            CRD types (+kubebuilder markers) and generated code
+internal/controller/     Reconcilers for the five resources
+internal/nomad/          Typed Nomad API client (pinned to v2.0.4)
+config/                  CRDs, RBAC, manager manifests, samples, Gateway API CRDs
+docs/                    User docs (this README's TOC) + docs/development history
 ```
 
-## Project Distribution
+`AGENTS.md` documents the codebase conventions for contributors and AI agents.
 
-Following the options to release and provide this solution to the users.
+## Documentation
 
-### By providing a bundle with all YAML files
+- **[Architecture](docs/architecture.md)** — resources, control-plane internals,
+  reconcile model, security model.
+- **[Edge agents](docs/agents/README.md)** — attach Nomad clients from outside
+  the cluster ([bare metal](docs/agents/bare-metal-nspawn.md) ·
+  [Mac mini](docs/agents/mac-mini-container.md) ·
+  [Linux VM](docs/agents/linux-vm-exec.md) ·
+  [TrueNAS](docs/agents/truenas.md)).
+- **Runbooks** — operational guides per resource:
+  [NomadCluster](docs/runbooks/nomadcluster.md) ·
+  [NomadNode](docs/runbooks/nomadnode.md) ·
+  [NomadPool](docs/runbooks/nomadpool.md) ·
+  [NomadNamespace](docs/runbooks/nomadnamespace.md) ·
+  [NomadJob](docs/runbooks/nomadjob.md).
+- **[docs/development/](docs/development/)** — design records, implementation
+  plans, and issue history (contributor-facing).
 
-1. Build the installer for the image built and published in the registry:
+## Development
 
-```sh
-make build-installer IMG=<some-registry>/nomad-operator:tag
+```bash
+make manifests generate fmt vet   # regenerate CRDs/DeepCopy, format, vet
+make test                         # envtest-backed controller + unit tests
+make test-integration             # hermetic tests against a real nomad v2.0.4 binary
+make run                          # run the controller against your kubeconfig
 ```
 
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/nomad-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v2-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+Contributor conventions and the codebase map are in
+[`AGENTS.md`](AGENTS.md); design and planning history lives under
+[`docs/development/`](docs/development/).
 
 ## License
 
-Copyright 2026.
+Apache License 2.0 (`SPDX-License-Identifier: Apache-2.0`).
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+> A top-level `LICENSE` file has not yet been committed — add the canonical
+> Apache-2.0 text to complete the declaration.

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26, kubebuilder v4 / controller-runtime v0.23.3, `github.com/hashicorp/nomad/api` (pinned `v0.0.0-20260707172059-5b83b133998a` == v2.0.4), Ginkgo/Gomega envtest, `net/http/httptest` unit tests, build tag `integration` for the live spike.
 
-**Design:** `docs/designs/2026-07-16-nomadnamespace-design.md` (HEAD `6615695`).
+**Design:** `docs/development/designs/2026-07-16-nomadnamespace-design.md` (HEAD `6615695`).
 
 > **For Claude:** REQUIRED EXECUTION WORKFLOW (follow in order):
 > 1. `superpowers:using-git-worktrees` — Isolate work in a dedicated worktree

@@ -19,7 +19,7 @@ branch, applied a narrowly-scoped `//nolint:staticcheck` at all four
 golangci-lint's default `max-same-issues:3`). `make lint` now reports **zero**
 SA1019; events fire identically. The real migration to the `events.EventRecorder`
 API is deferred behavioral work, tracked in
-`docs/2026-07-18-events-eventrecorder-api-migration.md`.
+`docs/development/issues/2026-07-18-events-eventrecorder-api-migration.md`.
 
 ## Problem
 

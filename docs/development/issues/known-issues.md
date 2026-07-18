@@ -16,7 +16,7 @@ Source: slice-2 whole-branch review, 2026-07-11.
   read; `status.members` is populated from the same read in
   `bootstrapAndReady` (`internal/controller/nomadcluster_controller.go`,
   `internal/controller/status_members.go`). See
-  `docs/designs/2026-07-17-nomadcluster-restart-resilience-design.md` §6.
+  `docs/development/designs/2026-07-17-nomadcluster-restart-resilience-design.md` §6.
 - **Severity:** Minor · **Area:** reconciler / status
 - **Location:** `internal/controller/nomadcluster_controller.go` (`bootstrapAndReady`, the
   `nc.Status.Quorum = fmt.Sprintf("%d/%d", servers, servers)` line, ~:219)
@@ -136,7 +136,7 @@ aren't re-litigated as open issues.
   reconciler keeps the previously-recorded `status.members`/`status.quorum`
   rather than zeroing them out.
 - **Rationale:** this is the intended keep-prior-status behavior specified in
-  `docs/designs/2026-07-17-nomadcluster-restart-resilience-design.md` §6.3 —
+  `docs/development/designs/2026-07-17-nomadcluster-restart-resilience-design.md` §6.3 —
   a momentarily empty read should not erase a known-good status. It is also
   near-impossible to trigger while a Raft leader exists, since the read comes
   from the leader's own Autopilot state.
@@ -239,7 +239,7 @@ A 2026-07-16 live-kind end-to-end run recorded that a `servers: 1` cluster
 *"advertise uses the ephemeral `POD_IP`, which changes on restart and wedges
 raft."* Both the observation's root cause and its generality were wrong,
 and are corrected here (slice 6b,
-`docs/designs/2026-07-17-nomadcluster-restart-resilience-design.md` §1–§3):
+`docs/development/designs/2026-07-17-nomadcluster-restart-resilience-design.md` §1–§3):
 
 - The recorded failure was a **bare-kind harness artifact** — the e2e run
   manually patched a non-durable fake LB ingress IP that changed across the

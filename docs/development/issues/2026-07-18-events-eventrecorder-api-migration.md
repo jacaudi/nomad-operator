@@ -1,7 +1,7 @@
 # Migrate reconcilers from the deprecated `record.EventRecorder` to the new `events.EventRecorder` API
 
 - **Severity:** Minor · **Area:** controller-runtime / event emission
-- **Source:** slice-6c follow-ups (2026-07-18); spun out of the SA1019 `GetEventRecorderFor` lint-debt fix (see `docs/2026-07-18-geteventrecorderfor-sa1019-lint-debt.md`).
+- **Source:** slice-6c follow-ups (2026-07-18); spun out of the SA1019 `GetEventRecorderFor` lint-debt fix (see `docs/development/issues/2026-07-18-geteventrecorderfor-sa1019-lint-debt.md`).
 - **Status:** Open (follow-up / deferred behavioral migration)
 
 ## Problem

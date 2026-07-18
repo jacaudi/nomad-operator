@@ -19,7 +19,7 @@
 
 **Tech Stack:** Go 1.26.4; `sigs.k8s.io/controller-runtime` v0.23.3; `k8s.io/{api,apimachinery,client-go}` v0.35.0; `github.com/hashicorp/nomad/api` pinned `v0.0.0-20260707172059-5b83b133998a` (== v2.0.4); `sigs.k8s.io/gateway-api` (experimental channel, for `TCPRoute`/`TLSRoute`); envtest.
 
-**Design doc:** `docs/designs/2026-07-10-nomadcluster-control-plane-design.md` (read §3 before starting).
+**Design doc:** `docs/development/designs/2026-07-10-nomadcluster-control-plane-design.md` (read §3 before starting).
 
 **Plan review amendments (2026-07-10, second sr-go-engineer review):** folded before execution — (B1) readiness is an **exec** probe (`nomad operator api …` with `NOMAD_*` env), not `httpGet`, because `verify_https_client=true` breaks cert-less HTTP probes; design §3.7 amended to match. (B2) the init container now writes an **overlay config file** injecting the gossip `encrypt` key and per-pod advertise, and the agent loads `-config=/nomad/config` (directory merge) — gossip encryption is actually enabled. (B3) the `apply` helper uses **Server-Side Apply** (avoids clearing the immutable Service `clusterIP` on re-reconcile). (I1) `Degraded` is now assigned on quorum loss; `status.members` + friendly-leader name are explicitly deferred to slice 6. Minors M1–M6 folded (default-list marker quoting, `intstr.FromInt32`, dead code, Step-4a ordering, offline CRD copy from `GOMODCACHE`). New tests: exec-probe assertion + init-entrypoint-injects-gossip-key (note: the file adding the latter needs `strings` in its import block).
 

@@ -16,7 +16,7 @@
 
 **Goal:** Add a `NomadNode` CRD that reflects self-registered Nomad edge clients into Kubernetes as representations, and lets a user drive scheduling eligibility and drain onto them — plus an optional `NomadClusterSpec.nodeGCThreshold` companion field.
 
-**Architecture:** A second controller keyed on `NomadCluster` polls each `Ready` cluster's node list (one `Nodes().List()` per resync) via a per-cluster Nomad client, and for each node upserts a `NomadNode` CR (existence + status operator-owned), reconciling the user-owned `spec.eligible`/`spec.drain` onto Nomad. The representation model mirrors the Kubernetes `Node` object: operator owns Create+Delete, user owns Read+Update. Design: `docs/designs/2026-07-12-nomadnode-design.md`.
+**Architecture:** A second controller keyed on `NomadCluster` polls each `Ready` cluster's node list (one `Nodes().List()` per resync) via a per-cluster Nomad client, and for each node upserts a `NomadNode` CR (existence + status operator-owned), reconciling the user-owned `spec.eligible`/`spec.drain` onto Nomad. The representation model mirrors the Kubernetes `Node` object: operator owns Create+Delete, user owns Read+Update. Design: `docs/development/designs/2026-07-12-nomadnode-design.md`.
 
 **Tech Stack:** Go 1.26.4, kubebuilder v4, controller-runtime v0.23.3, k8s v0.35.0, Ginkgo/Gomega envtest, `github.com/hashicorp/nomad/api` (pinned `5b83b133998a` == v2.0.4).
 

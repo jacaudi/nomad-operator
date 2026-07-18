@@ -11,7 +11,7 @@ bin/
 .claude/worktrees/
 
 # Session handoff prompts (scratch)
-docs/prompts/
+docs/development/prompts/
 
 # Subagent-driven-development process scratch (ledger, briefs, reports, diffs)
 .superpowers/

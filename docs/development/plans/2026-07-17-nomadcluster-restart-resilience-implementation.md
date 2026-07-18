@@ -21,7 +21,7 @@
 
 ## Global Constraints
 
-- **Design of record:** `docs/designs/2026-07-17-nomadcluster-restart-resilience-design.md` (SGE-Opus reviewed, amend-before-planning findings folded). This plan implements it verbatim.
+- **Design of record:** `docs/development/designs/2026-07-17-nomadcluster-restart-resilience-design.md` (SGE-Opus reviewed, amend-before-planning findings folded). This plan implements it verbatim.
 - **No networking/advertise change.** `advertise.rpc` wiring, Services, Gateway/LB topology, per-ordinal ports, PDB, anti-affinity, and the Pending→Bootstrapping→Ready→Degraded phase machine are untouched.
 - **REJECTED (do not build):** per-pod ClusterIP advertise; automatic `peers.json` recovery.
 - **`contract.go` discipline:** every new `api` symbol used is pinned in `internal/nomad/contract.go`, backed by a real call (existence-only-pin rule).
@@ -45,7 +45,7 @@
 - `internal/controller/status_members.go` — **create**: `toMemberStatus` + `quorumString` helpers (Task 3).
 - `internal/controller/nomadcluster_controller_test.go` — **modify**: members/quorum spec (Task 3), drift-guard specs (Task 4).
 - `config/crd/bases/nomad.operator.io_nomadclusters.yaml`, `api/v1alpha1/zzz_generated.deepcopy.go` — **regenerated** (Task 2).
-- `docs/runbooks/nomadcluster.md`, `docs/known-issues.md` — **modify** (Task 5).
+- `docs/runbooks/nomadcluster.md`, `docs/development/issues/known-issues.md` — **modify** (Task 5).
 
 ---
 
@@ -631,7 +631,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `docs/runbooks/nomadcluster.md` (new section after §8)
-- Modify: `docs/known-issues.md` (§1 → resolved; correct the restart-artifact record)
+- Modify: `docs/development/issues/known-issues.md` (§1 → resolved; correct the restart-artifact record)
 
 **Interfaces:** none (docs). References the `RaftAddressDrift` condition (Task 4) and real `status.quorum`/`members` (Task 3).
 
@@ -644,7 +644,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
     - Simplest (dev-acceptable) — delete the server pod's `data-<sts>-0` PVC and let the StatefulSet re-bootstrap a clean single-node raft at the new address (loses Nomad state).
     - Guidance: prefer `servers: 3` for any cluster where external-address drift is plausible; HA self-heals.
 
-- [ ] **Step 2: Correct `docs/known-issues.md`.**
+- [ ] **Step 2: Correct `docs/development/issues/known-issues.md`.**
   - §1 (`status.quorum is fabricated N/N, not measured`): mark **Resolved (2026-07-17, slice 6b)** — `status.quorum` is now `voters/total` and `status.members` is populated from `Operator().AutopilotServerHealth` in `bootstrapAndReady`.
   - Add a short correction note (near the FR-1 / restart discussion): the earlier "servers:1 does not survive a server-pod restart" observation was a **bare-kind harness artifact** — the e2e manually patched a non-durable fake LB ingress IP that changed across the restart. With a real LB/Gateway the advertised address is stable and a restart self-heals; the genuine, narrow failure mode is `servers: 1` + external-address **drift**, covered by the runbook §9 recovery + the `RaftAddressDrift` guard.
 
@@ -656,7 +656,7 @@ Expected: docs-only diff; tests still green.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add docs/runbooks/nomadcluster.md docs/known-issues.md
+git add docs/runbooks/nomadcluster.md docs/development/issues/known-issues.md
 git commit -m "docs: restart-resilience runbook + recovery + known-issues corrections
 
 Adds runbook section 9 (verified restart truth table, RaftAddressDrift
