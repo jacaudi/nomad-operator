@@ -178,6 +178,9 @@ func (r *NomadNodeReconciler) upsertNode(ctx context.Context, nc *nomadv1alpha1.
 		// is immutable (CRD CEL rule), so the identity cannot be rewritten in place:
 		// delete the stale CR and re-mint it under the live owner (same object
 		// name). NomadNode carries no finalizer, so the delete is synchronous.
+		// Under a lagging informer cache a reconcile could briefly re-observe the
+		// pre-delete object and repeat this delete+re-mint, but it always converges
+		// on the same deterministic owner, so the churn is bounded and self-healing.
 		log.FromContext(ctx).Info("re-adopting node whose recorded owner has disappeared",
 			"node", stub.Name, "object", objName, "formerOwner", nn.Spec.NodeName)
 		if err := r.Delete(ctx, &nn); err != nil && !apierrors.IsNotFound(err) {
