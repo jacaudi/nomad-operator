@@ -11,7 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -553,7 +553,7 @@ func reconcileOnce(r *NomadClusterReconciler, name, ns string) {
 
 // driveToReady runs the two-reconcile Managed path to Ready at address A,
 // returning the reconciler (with a fake recorder) for a follow-up drift.
-func driveToReady(ctx context.Context, name, ns, addrA string, servers int32, rpcPorts []int32) (*NomadClusterReconciler, *record.FakeRecorder) {
+func driveToReady(ctx context.Context, name, ns, addrA string, servers int32, rpcPorts []int32) (*NomadClusterReconciler, *events.FakeRecorder) {
 	Expect(k8s.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
 	makeCertSecret(ctx, ns)
 	nc := minimalCluster(name, ns)
@@ -561,7 +561,7 @@ func driveToReady(ctx context.Context, name, ns, addrA string, servers int32, rp
 	nc.Spec.ExternalAccess.Gateway.RPCPorts = rpcPorts
 	Expect(k8s.Create(ctx, nc)).To(Succeed())
 
-	rec := record.NewFakeRecorder(10)
+	rec := events.NewFakeRecorder(10)
 	fake := &fakeNomad{leader: "10.0.0.5:14647", serverHealthy: true}
 	r := &NomadClusterReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: newFakeFactory(fake), Recorder: rec}
 

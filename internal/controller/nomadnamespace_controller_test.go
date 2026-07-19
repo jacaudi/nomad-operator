@@ -14,7 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -51,7 +51,7 @@ var _ = Describe("NomadNamespace reconciler: cluster resolution", func() {
 		Expect(k8s.Create(ctx, nn)).To(Succeed())
 
 		f := newFakeNamespaceOps()
-		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "team-a", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -83,7 +83,7 @@ var _ = Describe("NomadNamespace reconciler: cluster resolution", func() {
 		Expect(k8s.Create(ctx, nn)).To(Succeed())
 
 		f := newFakeNamespaceOps()
-		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "team-a", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -116,7 +116,7 @@ var _ = Describe("NomadNamespace reconciler: apply", func() {
 		// Seed an existing namespace carrying an unmanaged Quota to prove preservation.
 		f.namespaces["team-a"] = &api.Namespace{Name: "team-a", Quota: "q1", Description: "old"}
 		f.jobCount = 3
-		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "team-a", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -147,7 +147,7 @@ var _ = Describe("NomadNamespace reconciler: apply", func() {
 		Expect(k8s.Create(ctx, nn)).To(Succeed())
 		f := newFakeNamespaceOps()
 		f.namespaces["team-a"] = &api.Namespace{Name: "team-a", Description: "same", Meta: map[string]string{"k": "v"}}
-		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "team-a", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(f.registered).To(BeEmpty(), "no Register when nothing drifted")
@@ -172,7 +172,7 @@ var _ = Describe("NomadNamespace reconciler: conflict", func() {
 		Expect(k8s.Create(ctx, second)).To(Succeed())
 
 		f := newFakeNamespaceOps()
-		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "team-a-2", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -204,7 +204,7 @@ var _ = Describe("NomadNamespace reconciler: finalize", func() {
 		nn := newNS(ctx, ns.Name, nc.Name, true)
 
 		f := newFakeNamespaceOps()
-		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nn.Name, Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(f.deleted).To(ConsistOf("team-a"))
@@ -222,7 +222,7 @@ var _ = Describe("NomadNamespace reconciler: finalize", func() {
 		f := newFakeNamespaceOps()
 		f.jobCount = 2
 		f.deleteErr = notEmptyErr() // a genuine "not empty" api.UnexpectedResponseError the classifier matches
-		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nn.Name, Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 		var got nomadv1alpha1.NomadNamespace
@@ -240,7 +240,7 @@ var _ = Describe("NomadNamespace reconciler: finalize", func() {
 		nn := newNS(ctx, ns.Name, "missing-cluster", true)
 
 		f := newFakeNamespaceOps()
-		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nn.Name, Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(f.deleted).To(BeEmpty(), "must not call Delete when cluster is gone")
@@ -261,7 +261,7 @@ var _ = Describe("NomadNamespace reconciler: finalize", func() {
 		nn := newNS(ctx, ns.Name, nc.Name, true)
 
 		f := newFakeNamespaceOps()
-		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadNamespaceReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: nn.Name, Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(f.deleted).To(BeEmpty(), "must not call Delete when cluster is Terminating")

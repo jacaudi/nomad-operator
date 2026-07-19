@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -50,7 +50,7 @@ type NomadPoolReconciler struct {
 	client.Client
 	Scheme         *runtime.Scheme
 	NewNomadClient NomadPoolClientFactory
-	Recorder       record.EventRecorder
+	Recorder       events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=nomad.operator.io,resources=nomadpools,verbs=get;list;watch;create;update;patch;delete
@@ -142,7 +142,7 @@ func (r *NomadPoolReconciler) reconcilePool(ctx context.Context, np *nomadv1alph
 	}
 	if conflict {
 		setPoolCondition(np, nomadv1alpha1.NomadPoolCondReady, metav1.ConditionFalse, nomadv1alpha1.ReasonPoolNameConflict, "another NomadPool targets this poolName on this cluster; skipping Register")
-		r.Recorder.Event(np, "Warning", nomadv1alpha1.ReasonPoolNameConflict, "duplicate poolName on the same cluster; not registering to avoid churn")
+		r.Recorder.Eventf(np, nil, "Warning", nomadv1alpha1.ReasonPoolNameConflict, "Register", "duplicate poolName on the same cluster; not registering to avoid churn")
 		np.Status.ObservedGeneration = np.Generation
 		if err := r.Status().Update(ctx, np); err != nil {
 			return ctrl.Result{}, err
@@ -292,11 +292,7 @@ func (r *NomadPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.NewNomadClient = DefaultNomadPoolClientFactory
 	}
 	if r.Recorder == nil {
-		// SA1019: GetEventRecorderFor is genuinely deprecated, but its replacement
-		// GetEventRecorder returns events.EventRecorder, incompatible with our
-		// record.EventRecorder field and .Event() call sites; migrating is a
-		// behavioral change out of scope for lint cleanup.
-		r.Recorder = mgr.GetEventRecorderFor("nomadpool") //nolint:staticcheck // SA1019: see comment above
+		r.Recorder = mgr.GetEventRecorder("nomadpool")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nomadv1alpha1.NomadPool{}).

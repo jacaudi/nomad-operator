@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -35,7 +35,7 @@ var _ = Describe("NomadPool reconciler: cluster resolution", func() {
 		Expect(k8s.Create(ctx, np)).To(Succeed())
 
 		f := newFakePoolOps()
-		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "gpu", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -67,7 +67,7 @@ var _ = Describe("NomadPool reconciler: cluster resolution", func() {
 		Expect(k8s.Create(ctx, np)).To(Succeed())
 
 		f := newFakePoolOps()
-		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "gpu", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -98,7 +98,7 @@ var _ = Describe("NomadPool reconciler: ownerRef + requeue", func() {
 		Expect(k8s.Create(ctx, np)).To(Succeed())
 
 		f := newFakePoolOps()
-		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "gpu", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res).To(Equal(ctrl.Result{RequeueAfter: poolResync}))
@@ -134,7 +134,7 @@ var _ = Describe("NomadPool reconciler: apply", func() {
 		}
 		Expect(k8s.Create(ctx, np)).To(Succeed())
 
-		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "gpu", Namespace: ns.Name}}
 		_, err := r.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())
@@ -177,7 +177,7 @@ var _ = Describe("NomadPool reconciler: status nodeCount", func() {
 		}
 		Expect(k8s.Create(ctx, np)).To(Succeed())
 
-		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "gpu", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -194,7 +194,7 @@ var _ = Describe("NomadPool reconciler: poolName collision", func() {
 		nc := readyCluster(ctx, ns.Name)
 
 		f := newFakePoolOps()
-		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 
 		// Both CRs must exist before either is reconciled, so the List sees both.
 		for _, objName := range []string{"gpu-a", "gpu-b"} {
@@ -232,7 +232,7 @@ var _ = Describe("NomadPool reconciler: poolName collision", func() {
 		nc := readyCluster(ctx, ns.Name)
 
 		f := newFakePoolOps()
-		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 
 		mustCreateTerminatingPool(ctx, ns.Name, "gpu-old", nc.Name, "gpu")
 
@@ -265,7 +265,7 @@ var _ = Describe("NomadPool reconciler: finalize", func() {
 
 		f := newFakePoolOps()
 		f.pools["gpu"] = &api.NodePool{Name: "gpu"}
-		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 
 		np := &nomadv1alpha1.NomadPool{
 			ObjectMeta: metav1.ObjectMeta{Name: "gpu", Namespace: ns.Name, Finalizers: []string{nomadPoolFinalizer}},
@@ -293,7 +293,7 @@ var _ = Describe("NomadPool reconciler: finalize", func() {
 		// covered by Task 1's httptest test and Task 10's live spike.
 		f.deleteErr = errors.New("delete failed: node pool has nodes")
 		f.nodeCount, f.jobCount = 2, 1
-		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 
 		np := &nomadv1alpha1.NomadPool{
 			ObjectMeta: metav1.ObjectMeta{Name: "gpu", Namespace: ns.Name, Finalizers: []string{nomadPoolFinalizer}},
@@ -325,7 +325,7 @@ var _ = Describe("NomadPool reconciler: finalize", func() {
 
 		f := newFakePoolOps()
 		f.pools["gpu"] = &api.NodePool{Name: "gpu"}
-		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 
 		np := &nomadv1alpha1.NomadPool{
 			ObjectMeta: metav1.ObjectMeta{Name: "gpu", Namespace: ns.Name, Finalizers: []string{nomadPoolFinalizer}},
@@ -353,7 +353,7 @@ var _ = Describe("NomadPool reconciler: finalize", func() {
 		nc := mustCreateTerminatingCluster(ctx, ns.Name)
 
 		f := newFakePoolOps()
-		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadPoolReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 
 		np := &nomadv1alpha1.NomadPool{
 			ObjectMeta: metav1.ObjectMeta{Name: "gpu", Namespace: ns.Name, Finalizers: []string{nomadPoolFinalizer}},

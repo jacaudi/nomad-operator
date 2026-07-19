@@ -15,7 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -46,7 +46,7 @@ var _ = Describe("NomadJob reconciler: cluster resolution", func() {
 		Expect(k8s.Create(ctx, nj)).To(Succeed())
 
 		f := newFakeJobOps()
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -79,7 +79,7 @@ var _ = Describe("NomadJob reconciler: cluster resolution", func() {
 		Expect(k8s.Create(ctx, nj)).To(Succeed())
 
 		f := newFakeJobOps()
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -111,7 +111,7 @@ var _ = Describe("NomadJob reconciler: ownerRef + requeue", func() {
 		Expect(k8s.Create(ctx, nj)).To(Succeed())
 
 		f := newFakeJobOps()
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res).To(Equal(ctrl.Result{RequeueAfter: jobResync}))
@@ -144,7 +144,7 @@ var _ = Describe("NomadJob reconciler: apply", func() {
 		}
 		Expect(k8s.Create(ctx, nj)).To(Succeed())
 
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -181,7 +181,7 @@ var _ = Describe("NomadJob reconciler: apply", func() {
 		}
 		Expect(k8s.Create(ctx, nj)).To(Succeed())
 
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -213,7 +213,7 @@ var _ = Describe("NomadJob reconciler: apply", func() {
 		}
 		Expect(k8s.Create(ctx, nj)).To(Succeed())
 
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -246,7 +246,7 @@ var _ = Describe("NomadJob reconciler: apply", func() {
 		}
 		Expect(k8s.Create(ctx, nj)).To(Succeed())
 
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -280,7 +280,7 @@ var _ = Describe("NomadJob reconciler: apply", func() {
 		}
 		Expect(k8s.Create(ctx, nj)).To(Succeed())
 
-		rec := record.NewFakeRecorder(10)
+		rec := events.NewFakeRecorder(10)
 		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: rec}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
@@ -289,6 +289,41 @@ var _ = Describe("NomadJob reconciler: apply", func() {
 		Eventually(rec.Events).Should(Receive(&got))
 		Expect(got).To(ContainSubstring("deprecated x"))
 		Expect(got).To(ContainSubstring("RegisterWarnings"), "the event Reason must be RegisterWarnings; a changed Reason or event type is a regression")
+	})
+
+	It("preserves a literal percent in Register warnings verbatim in the event note", func(ctx SpecContext) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "nj-apply-warn-pct-"}}
+		Expect(k8s.Create(ctx, ns)).To(Succeed())
+		nc := readyCluster(ctx, ns.Name)
+
+		f := newFakeJobOps()
+		f.planChanged = true
+		// A runtime warning from Nomad may contain a literal '%'. It must be passed
+		// as a %s arg to Eventf, never inlined into the note format position, or the
+		// stray verb corrupts the note (e.g. "%!s(MISSING)").
+		f.warnings = "deprecated 50% soon"
+
+		nj := &nomadv1alpha1.NomadJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name},
+			Spec: nomadv1alpha1.NomadJobSpec{
+				ClusterRef: nomadv1alpha1.JobClusterRef{Name: nc.Name},
+				JobID:      "web",
+				Job:        minimalJobRaw(),
+			},
+		}
+		Expect(k8s.Create(ctx, nj)).To(Succeed())
+
+		rec := events.NewFakeRecorder(10)
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: rec}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got string
+		Eventually(rec.Events).Should(Receive(&got))
+		// The whole warning, percent included, must appear verbatim. Inlining it into
+		// the note format position turns "50% soon" into "50%!s(MISSING)oon", so the
+		// assertion must cover the trailing word — a bare "50%" survives the corruption.
+		Expect(got).To(ContainSubstring("deprecated 50% soon"), "a literal %% in a Nomad warning must survive verbatim; inlining it into the note format position corrupts it")
 	})
 })
 
@@ -319,7 +354,7 @@ var _ = Describe("NomadJob reconciler: status", func() {
 		}
 		Expect(k8s.Create(ctx, nj)).To(Succeed())
 
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -354,7 +389,7 @@ var _ = Describe("NomadJob reconciler: status", func() {
 		}
 		Expect(k8s.Create(ctx, nj)).To(Succeed())
 
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -371,7 +406,7 @@ var _ = Describe("NomadJob reconciler: finalize", func() {
 
 		f := newFakeJobOps()
 		f.jobs["web"] = &api.Job{}
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 
 		nj := &nomadv1alpha1.NomadJob{
 			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name, Finalizers: []string{nomadJobFinalizer}},
@@ -397,7 +432,7 @@ var _ = Describe("NomadJob reconciler: finalize", func() {
 		nc := mustCreateTerminatingCluster(ctx, ns.Name)
 
 		f := newFakeJobOps()
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 
 		nj := &nomadv1alpha1.NomadJob{
 			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name, Finalizers: []string{nomadJobFinalizer}},
@@ -425,7 +460,7 @@ var _ = Describe("NomadJob reconciler: finalize", func() {
 
 		f := newFakeJobOps()
 		f.jobs["web"] = &api.Job{}
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 
 		nj := &nomadv1alpha1.NomadJob{
 			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name, Finalizers: []string{nomadJobFinalizer}},
@@ -459,7 +494,7 @@ var _ = Describe("NomadJob reconciler: finalize", func() {
 		f := newFakeJobOps()
 		f.jobs["web"] = &api.Job{}
 		f.deregisterErr = errors.New("boom")
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 
 		nj := &nomadv1alpha1.NomadJob{
 			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name, Finalizers: []string{nomadJobFinalizer}},
@@ -494,7 +529,7 @@ var _ = Describe("NomadJob reconciler: finalize", func() {
 		// terminating-cluster spec above, which exercises the DeletionTimestamp
 		// disjunct.
 		f := newFakeJobOps()
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 
 		nj := &nomadv1alpha1.NomadJob{
 			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name, Finalizers: []string{nomadJobFinalizer}},
@@ -534,7 +569,7 @@ var _ = Describe("NomadJob reconciler: finalize", func() {
 		f := newFakeJobOps()
 		f.jobs["web"] = &api.Job{}
 		f.deregisterErr = notFound
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 
 		nj := &nomadv1alpha1.NomadJob{
 			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name, Finalizers: []string{nomadJobFinalizer}},
@@ -646,7 +681,7 @@ var _ = Describe("NomadJob finalizer namespace threading", func() {
 		Expect(k8s.Get(ctx, types.NamespacedName{Name: "web", Namespace: ns.Name}, &got)).To(Succeed())
 
 		f := newFakeJobOps()
-		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: record.NewFakeRecorder(10)}
+		r := &NomadJobReconciler{Client: k8s, Scheme: k8s.Scheme(), NewNomadClient: f.factory(), Recorder: events.NewFakeRecorder(10)}
 		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "web", Namespace: ns.Name}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(f.deregistered).To(ConsistOf("web"))

@@ -26,7 +26,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -65,7 +65,7 @@ type NomadClusterReconciler struct {
 	client.Client
 	Scheme         *runtime.Scheme
 	NewNomadClient NomadClientFactory
-	Recorder       record.EventRecorder
+	Recorder       events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=nomad.operator.io,resources=nomadclusters,verbs=get;list;watch;create;update;patch;delete
@@ -293,11 +293,7 @@ func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.NewNomadClient = DefaultNomadClientFactory
 	}
 	if r.Recorder == nil {
-		// SA1019: GetEventRecorderFor is genuinely deprecated, but its replacement
-		// GetEventRecorder returns events.EventRecorder, incompatible with our
-		// record.EventRecorder field and .Event() call sites; migrating is a
-		// behavioral change out of scope for lint cleanup.
-		r.Recorder = mgr.GetEventRecorderFor("nomadcluster") //nolint:staticcheck // SA1019: see comment above
+		r.Recorder = mgr.GetEventRecorder("nomadcluster")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nomadv1alpha1.NomadCluster{}).
@@ -341,13 +337,13 @@ func (r *NomadClusterReconciler) checkAddressDrift(nc *nomadv1alpha1.NomadCluste
 		setCondition(nc, nomadv1alpha1.CondRaftAddressDrift, metav1ConditionTrue, "AddressChanged",
 			msg+"; single-node raft will wedge on the ensuing roll - see the restart-resilience recovery runbook")
 		if nc.Status.Phase == nomadv1alpha1.PhaseReady && r.Recorder != nil {
-			r.Recorder.Event(nc, "Warning", nomadv1alpha1.CondRaftAddressDrift, msg+"; servers:1 raft will wedge - see recovery runbook")
+			r.Recorder.Eventf(nc, nil, "Warning", nomadv1alpha1.CondRaftAddressDrift, "RaftAddressDrift", "%s", msg+"; servers:1 raft will wedge - see recovery runbook")
 		}
 		return
 	}
 	setCondition(nc, nomadv1alpha1.CondRaftAddressDrift, metav1ConditionTrue, "AddressChangedHA",
 		msg+"; HA autopilot will self-heal")
 	if r.Recorder != nil {
-		r.Recorder.Event(nc, "Normal", nomadv1alpha1.CondRaftAddressDrift, msg+"; HA autopilot will self-heal")
+		r.Recorder.Eventf(nc, nil, "Normal", nomadv1alpha1.CondRaftAddressDrift, "RaftAddressDrift", "%s", msg+"; HA autopilot will self-heal")
 	}
 }

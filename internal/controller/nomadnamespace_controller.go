@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -50,7 +50,7 @@ type NomadNamespaceReconciler struct {
 	client.Client
 	Scheme         *runtime.Scheme
 	NewNomadClient NomadNamespaceClientFactory
-	Recorder       record.EventRecorder
+	Recorder       events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=nomad.operator.io,resources=nomadnamespaces,verbs=get;list;watch;create;update;patch;delete
@@ -139,7 +139,7 @@ func (r *NomadNamespaceReconciler) reconcileNamespace(ctx context.Context, nn *n
 	}
 	if conflict {
 		setNamespaceCondition(nn, nomadv1alpha1.NomadNamespaceCondReady, metav1.ConditionFalse, nomadv1alpha1.ReasonNamespaceNameConflict, "another NomadNamespace targets this namespaceName on this cluster; skipping Register")
-		r.Recorder.Event(nn, "Warning", nomadv1alpha1.ReasonNamespaceNameConflict, "duplicate namespaceName on the same cluster; not registering to avoid churn")
+		r.Recorder.Eventf(nn, nil, "Warning", nomadv1alpha1.ReasonNamespaceNameConflict, "Register", "duplicate namespaceName on the same cluster; not registering to avoid churn")
 		nn.Status.ObservedGeneration = nn.Generation
 		if err := r.Status().Update(ctx, nn); err != nil {
 			return ctrl.Result{}, err
@@ -251,11 +251,7 @@ func (r *NomadNamespaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.NewNomadClient = DefaultNomadNamespaceClientFactory
 	}
 	if r.Recorder == nil {
-		// SA1019: GetEventRecorderFor is genuinely deprecated, but its replacement
-		// GetEventRecorder returns events.EventRecorder, incompatible with our
-		// record.EventRecorder field and .Event() call sites; migrating is a
-		// behavioral change out of scope for lint cleanup.
-		r.Recorder = mgr.GetEventRecorderFor("nomadnamespace") //nolint:staticcheck // SA1019: see comment above
+		r.Recorder = mgr.GetEventRecorder("nomadnamespace")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nomadv1alpha1.NomadNamespace{}).

@@ -30,7 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -89,7 +89,7 @@ type NomadJobReconciler struct {
 	client.Client
 	Scheme         *runtime.Scheme
 	NewNomadClient NomadJobClientFactory
-	Recorder       record.EventRecorder
+	Recorder       events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=nomad.operator.io,resources=nomadjobs,verbs=get;list;watch;create;update;patch;delete
@@ -195,7 +195,7 @@ func (r *NomadJobReconciler) reconcileJob(ctx context.Context, nj *nomadv1alpha1
 			return ctrl.Result{}, err
 		}
 		if warnings != "" {
-			r.Recorder.Event(nj, "Normal", "RegisterWarnings", warnings)
+			r.Recorder.Eventf(nj, nil, "Normal", "RegisterWarnings", "RegisterJob", "%s", warnings)
 		}
 	}
 
@@ -305,11 +305,7 @@ func (r *NomadJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.NewNomadClient = DefaultNomadJobClientFactory
 	}
 	if r.Recorder == nil {
-		// SA1019: GetEventRecorderFor is genuinely deprecated, but its replacement
-		// GetEventRecorder returns events.EventRecorder, incompatible with our
-		// record.EventRecorder field and .Event() call sites; migrating is a
-		// behavioral change out of scope for lint cleanup.
-		r.Recorder = mgr.GetEventRecorderFor("nomadjob") //nolint:staticcheck // SA1019: see comment above
+		r.Recorder = mgr.GetEventRecorder("nomadjob")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nomadv1alpha1.NomadJob{}).
