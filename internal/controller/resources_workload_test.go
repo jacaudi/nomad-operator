@@ -182,6 +182,12 @@ func TestInitEntrypointRPCAdvertiseBranches(t *testing.T) {
 	if strings.Contains(initEntrypoint, `rpc  = "${GW}:${RPCPORT}"`) {
 		t.Error("overlay must not hardcode the external rpc advertise for all servers (the HA bug)")
 	}
+	// The shell branch condition literal MUST match the rpcAdvertisePod const,
+	// or buildConfigMap (which writes the const) and the entrypoint (which tests
+	// the literal) would disagree and silently misroute to the external branch.
+	if !strings.Contains(initEntrypoint, `= "`+rpcAdvertisePod+`"`) {
+		t.Errorf("entrypoint branch must test = %q to stay in sync with the rpcAdvertisePod const", rpcAdvertisePod)
+	}
 	// serf/http advertise must stay byte-for-byte unchanged.
 	if !strings.Contains(initEntrypoint, `serf = "${POD_IP}"`) {
 		t.Error("serf advertise must remain ${POD_IP}")
