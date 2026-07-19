@@ -2,7 +2,37 @@
 
 - **Severity:** Minor · **Area:** controller-runtime / event emission
 - **Source:** slice-6c follow-ups (2026-07-18); spun out of the SA1019 `GetEventRecorderFor` lint-debt fix (see `docs/development/issues/2026-07-18-geteventrecorderfor-sa1019-lint-debt.md`).
-- **Status:** Open (follow-up / deferred behavioral migration)
+- **Status:** RESOLVED — 2026-07-19, commits `4ad8764` + `dfc9eba`, merged fast-forward to local `main` (HEAD `dfc9eba`).
+
+## Resolution
+
+Done as the real behavioral migration this issue tracked; the slice-6c
+`//nolint:staticcheck` suppressions are retired. All four reconcilers
+(`nomadcluster`, `nomadjob`, `nomadnamespace`, `nomadpool`) now hold a
+`Recorder events.EventRecorder` field wired via `mgr.GetEventRecorder("<name>")`
+(same recorder-name strings), and every emission moved from
+`.Event(obj, type, reason, msg)` to
+`.Eventf(regarding, related=nil, type, reason, action, note, args...)`. The four
+`//nolint:staticcheck` suppressions were removed (the unrelated `client.Apply`
+one at `security.go:183` and the recorder-less `NomadNode` reconciler were left
+untouched).
+
+Correctness note: the new API exposes only the format-based `Eventf`, so the
+runtime Nomad `warnings` string in `nomadjob` is passed as a `"%s"` argument
+rather than inlined into the `note` format string — a stray `%` in a warning
+would otherwise corrupt the event. A regression test (`"deprecated 50% soon"`)
+guards this and fails on the naive inlined form. Chosen `action` verbs:
+`RaftAddressDrift` (drift ×2), `RegisterJob` (register warnings), and
+`RegisterSkipped` for the two name-conflict events (they fire when registration
+is *skipped*, so `"Register"` would have been misleading in the operator-visible
+`Action` field).
+
+Verification: `make lint` reports **zero** SA1019 (the deprecated symbol is gone,
+not suppressed); build + full test gate green with zero regen drift
+(`internal/controller` 80.2%, `internal/nomad` 73.9%); `go vet -tags integration`
+clean; independent whole-branch review Ready-to-merge (0 Critical / 0 Important).
+A full kind end-to-end smoke test passed — the manager boots healthy and the new
+`GetEventRecorder` wiring was confirmed live by an emitted `LeaderElection` event.
 
 ## Problem
 
