@@ -161,6 +161,59 @@ func TestInitEntrypointInjectsGossipKey(t *testing.T) {
 	}
 }
 
+// TestInitEntrypointRPCAdvertiseBranches guards the HA raft fix: peers dial a
+// remote server at (its serf IP = POD_IP) + (its advertised RPC port), so a
+// multi-voter server MUST advertise the port it actually binds (4647) on its
+// pod-network IP, not the per-ordinal EXTERNAL gateway port (nothing listens
+// there → connection refused → no leader). The overlay therefore selects the
+// rpc advertise between the pod-network address (${POD_IP}:4647) and the
+// external-stable address (${GW}:${RPCPORT}); serf/http advertise are unchanged.
+func TestInitEntrypointRPCAdvertiseBranches(t *testing.T) {
+	if !strings.Contains(initEntrypoint, `RPCADV="${POD_IP}:4647"`) {
+		t.Error("entrypoint missing pod-network rpc advertise branch ${POD_IP}:4647 (HA raft peers dial POD_IP:4647)")
+	}
+	if !strings.Contains(initEntrypoint, `RPCADV="${GW}:${RPCPORT}"`) {
+		t.Error("entrypoint missing external-stable rpc advertise branch ${GW}:${RPCPORT} (servers:1 wedge guard)")
+	}
+	if !strings.Contains(initEntrypoint, `rpc  = "${RPCADV}"`) {
+		t.Error("overlay advertise.rpc must use the selected ${RPCADV}")
+	}
+	// The old, buggy line advertised the external port for every server.
+	if strings.Contains(initEntrypoint, `rpc  = "${GW}:${RPCPORT}"`) {
+		t.Error("overlay must not hardcode the external rpc advertise for all servers (the HA bug)")
+	}
+	// serf/http advertise must stay byte-for-byte unchanged.
+	if !strings.Contains(initEntrypoint, `serf = "${POD_IP}"`) {
+		t.Error("serf advertise must remain ${POD_IP}")
+	}
+	if !strings.Contains(initEntrypoint, `http = "${GW}:4646"`) {
+		t.Error("http advertise must remain ${GW}:4646 (edge HTTP redirects need the external addr)")
+	}
+}
+
+// TestBuildConfigMapRPCAdvertiseFlag guards the per-mode advertise decision that
+// drives the entrypoint branch. The predicate is servers==1 (single-voter needs a
+// stable self-address), independent of external-access mode: a multi-voter raft
+// (servers 3/5) advertises pod-network; every single-voter raft advertises the
+// external-stable address so it does not wedge on POD_IP drift (slice-6b).
+func TestBuildConfigMapRPCAdvertiseFlag(t *testing.T) {
+	// Gateway HA (servers 3): pod-network advertise so raft quorum forms.
+	ha := minimalCluster("prod", "nomad-system")
+	if got := buildConfigMap(ha, "10.0.0.5").Data["rpc_advertise"]; got != "pod" {
+		t.Errorf("Gateway HA rpc_advertise = %q, want pod", got)
+	}
+	// Gateway single-node (servers 1): external-stable, single-voter wedge guard.
+	g1 := singleServerCluster("prod", "nomad-system")
+	if got := buildConfigMap(g1, "10.0.0.5").Data["rpc_advertise"]; got != "external" {
+		t.Errorf("Gateway servers:1 rpc_advertise = %q, want external", got)
+	}
+	// LoadBalancer (servers 1): external-stable, unchanged slice-6b behavior.
+	lb := lbCluster("edge", "nomad-system")
+	if got := buildConfigMap(lb, "203.0.113.7").Data["rpc_advertise"]; got != "external" {
+		t.Errorf("LoadBalancer rpc_advertise = %q, want external", got)
+	}
+}
+
 // TestSingleServerPDBAllowsReschedule guards FR-1: a servers=1 control plane
 // has minAvailable=0, so the StatefulSet controller may reschedule/drain the
 // single pod (a brief control-plane outage, not a blocked eviction).

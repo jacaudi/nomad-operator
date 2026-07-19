@@ -318,15 +318,20 @@ func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // checkAddressDrift surfaces a change in the resolved external advertise
-// address. Raft integrity depends on a stable advertise.rpc: at servers:1 a
-// drift wedges the single-node raft (it cannot remove its sole voter) and needs
-// manual recovery; HA self-heals via autopilot. This DETECTS and reports only —
-// it does not block the ensuing StatefulSet roll (if the external address truly
-// changed, the old one is dead regardless). The Condition is momentary (True on
-// the reconcile that observes the change, else Stable); the emitted Event is the
-// durable record. The servers:1 Warning is gated on Ready (design M-3): a drift
-// observed during the first post-bootstrap roll (Phase != Ready) still sets the
-// Condition True but emits no Event. The HA path always emits a Normal Event.
+// address. Only a single-voter raft (servers:1) advertises this external address
+// as its raft advertise.rpc (${GW}:${RPCPORT}, see rpcAdvertiseStrategy), so a
+// drift there wedges the single-node raft (it cannot remove its sole voter) and
+// needs manual recovery. A multi-voter raft (servers 3/5) advertises its
+// pod-network address (${POD_IP}:4647) instead, so an external-address drift does
+// NOT touch HA raft — the HA path here is purely informational (edge HTTP/RPC
+// routing) and autopilot self-heals any pod-IP churn regardless. This DETECTS and
+// reports only — it does not block the ensuing StatefulSet roll (if the external
+// address truly changed, the old one is dead regardless). The Condition is
+// momentary (True on the reconcile that observes the change, else Stable); the
+// emitted Event is the durable record. The servers:1 Warning is gated on Ready
+// (design M-3): a drift observed during the first post-bootstrap roll
+// (Phase != Ready) still sets the Condition True but emits no Event. The HA path
+// always emits a Normal Event.
 func (r *NomadClusterReconciler) checkAddressDrift(nc *nomadv1alpha1.NomadCluster, prev, cur string) {
 	if prev == "" || prev == cur {
 		setCondition(nc, nomadv1alpha1.CondRaftAddressDrift, metav1ConditionFalse, "Stable", "external advertise address stable")

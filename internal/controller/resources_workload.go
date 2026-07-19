@@ -34,9 +34,38 @@ func buildConfigMap(nc *nomadv1alpha1.NomadCluster, gatewayAddress string) *core
 			"server.hcl":      body,
 			"gateway_address": gatewayAddress,
 			"rpc_ports":       ports,
+			"rpc_advertise":   rpcAdvertiseStrategy(nc),
 			"entrypoint.sh":   initEntrypoint,
 		},
 	}
+}
+
+// rpcAdvertise* are the two raft RPC advertise strategies the init entrypoint
+// branches on (read from ConfigMap key "rpc_advertise"). The literal
+// rpcAdvertisePod value MUST stay in sync with the `= "pod"` test in
+// initEntrypoint below.
+const (
+	rpcAdvertisePod      = "pod"
+	rpcAdvertiseExternal = "external"
+)
+
+// rpcAdvertiseStrategy selects how each server advertises its raft RPC address.
+// A single-voter raft (servers==1 — the LoadBalancer case and the single-node
+// Gateway case alike) must advertise a STABLE external address (${GW}:${RPCPORT}):
+// its pod IP drifts on restart and a lone voter cannot be removed from its own
+// peer set, so a drifting self-address wedges raft (slice-6b). A multi-voter raft
+// (servers 3/5) advertises its pod-network address (${POD_IP}:4647): peers reach a
+// remote server at (that server's serf IP = POD_IP) + (its advertised RPC port),
+// so the advertised port MUST be the 4647 the server actually binds — advertising
+// the per-ordinal EXTERNAL port leaves peers dialing a port nothing listens on
+// (connection refused → no leader). Autopilot self-heals POD_IP churn. The
+// predicate keys on servers, not mode, because single-voter wedge risk is a
+// property of the voter count.
+func rpcAdvertiseStrategy(nc *nomadv1alpha1.NomadCluster) string {
+	if nc.Spec.Servers == 1 {
+		return rpcAdvertiseExternal
+	}
+	return rpcAdvertisePod
 }
 
 // initEntrypoint runs in the init container: it copies the shared server.hcl and
@@ -44,6 +73,12 @@ func buildConfigMap(nc *nomadv1alpha1.NomadCluster, gatewayAddress string) *core
 // carries the per-pod advertise stanza AND the gossip encrypt key read from the
 // mounted gossip Secret. Nomad deep-merges the two server{} blocks across files,
 // so bootstrap_expect/server_join (base) + encrypt (overlay) combine.
+//
+// advertise.rpc is mode-aware (see rpcAdvertiseStrategy): "pod" advertises the
+// pod-network ${POD_IP}:4647 that a multi-voter server actually binds (so raft
+// peers dialing serfIP:advertisedPort reach a live listener), while any other
+// value keeps the external-stable ${GW}:${RPCPORT} a single voter needs. The
+// `= "pod"` literal below MUST match the rpcAdvertisePod constant.
 const initEntrypoint = `#!/bin/sh
 set -eu
 ORD="${HOSTNAME##*-}"
@@ -52,6 +87,7 @@ GW="$(cat /config/gateway_address)"
 KEY="$(cat /nomad/gossip/key)"
 i=0; RPCPORT=""
 for p in $PORTS; do if [ "$i" = "$ORD" ]; then RPCPORT="$p"; fi; i=$((i+1)); done
+if [ "$(cat /config/rpc_advertise)" = "pod" ]; then RPCADV="${POD_IP}:4647"; else RPCADV="${GW}:${RPCPORT}"; fi
 cp /config/server.hcl /nomad/config/server.hcl
 cat > /nomad/config/overlay.hcl <<EOF
 server {
@@ -59,7 +95,7 @@ server {
 }
 advertise {
   http = "${GW}:4646"
-  rpc  = "${GW}:${RPCPORT}"
+  rpc  = "${RPCADV}"
   serf = "${POD_IP}"
 }
 EOF
