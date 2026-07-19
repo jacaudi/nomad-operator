@@ -142,7 +142,7 @@ func (r *NomadPoolReconciler) reconcilePool(ctx context.Context, np *nomadv1alph
 	}
 	if conflict {
 		setPoolCondition(np, nomadv1alpha1.NomadPoolCondReady, metav1.ConditionFalse, nomadv1alpha1.ReasonPoolNameConflict, "another NomadPool targets this poolName on this cluster; skipping Register")
-		r.Recorder.Eventf(np, nil, "Warning", nomadv1alpha1.ReasonPoolNameConflict, "Register", "duplicate poolName on the same cluster; not registering to avoid churn")
+		r.Recorder.Eventf(np, nil, "Warning", nomadv1alpha1.ReasonPoolNameConflict, "RegisterSkipped", "duplicate poolName on the same cluster; not registering to avoid churn")
 		np.Status.ObservedGeneration = np.Generation
 		if err := r.Status().Update(ctx, np); err != nil {
 			return ctrl.Result{}, err

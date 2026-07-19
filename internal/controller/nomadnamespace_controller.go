@@ -139,7 +139,7 @@ func (r *NomadNamespaceReconciler) reconcileNamespace(ctx context.Context, nn *n
 	}
 	if conflict {
 		setNamespaceCondition(nn, nomadv1alpha1.NomadNamespaceCondReady, metav1.ConditionFalse, nomadv1alpha1.ReasonNamespaceNameConflict, "another NomadNamespace targets this namespaceName on this cluster; skipping Register")
-		r.Recorder.Eventf(nn, nil, "Warning", nomadv1alpha1.ReasonNamespaceNameConflict, "Register", "duplicate namespaceName on the same cluster; not registering to avoid churn")
+		r.Recorder.Eventf(nn, nil, "Warning", nomadv1alpha1.ReasonNamespaceNameConflict, "RegisterSkipped", "duplicate namespaceName on the same cluster; not registering to avoid churn")
 		nn.Status.ObservedGeneration = nn.Generation
 		if err := r.Status().Update(ctx, nn); err != nil {
 			return ctrl.Result{}, err
