@@ -1,0 +1,42 @@
+{{- if and .Values.namespace (ne .Values.namespace .Release.Namespace) }}
+{{- fail (printf "values.namespace (%s) must equal the release namespace (%s): bjw-s common renders the ServiceAccount/Deployment in .Release.Namespace, so a divergent values.namespace silently breaks RBAC. Install into the intended namespace (helm --namespace / HelmRelease targetNamespace) and leave values.namespace empty or matching." .Values.namespace .Release.Namespace) }}
+{{- end -}}
+{{- $args := list
+    "--health-probe-bind-address=:8081"
+    "--metrics-bind-address=:8443"
+    (printf "--leader-elect=%t" .Values.leaderElection.enabled) -}}
+{{- $values := dict
+  "global" (dict "nameOverride" "nomad-operator")
+  "serviceAccount" (dict "nomad-operator" (dict "enabled" true "forceRename" "nomad-operator"))
+  "defaultPodOptions" (dict
+    "automountServiceAccountToken" true
+    "securityContext" (dict "runAsNonRoot" true "runAsUser" 65532 "runAsGroup" 65532 "fsGroup" 65532 "seccompProfile" (dict "type" "RuntimeDefault")))
+  "controllers" (dict "main" (dict
+    "forceRename" "nomad-operator"
+    "replicas" (int .Values.replicas)
+    "containers" (dict "main" (dict
+      "image" (dict "repository" .Values.image.repository "tag" (.Values.image.tag | default .Chart.AppVersion) "pullPolicy" .Values.image.pullPolicy)
+      "args" $args
+      "ports" (list (dict "name" "https" "containerPort" 8443) (dict "name" "health" "containerPort" 8081))
+      "probes" (dict
+        "liveness" (dict "enabled" true "custom" true "spec" (dict "httpGet" (dict "path" "/healthz" "port" "health") "initialDelaySeconds" 15 "periodSeconds" 20))
+        "readiness" (dict "enabled" true "custom" true "spec" (dict "httpGet" (dict "path" "/readyz" "port" "health") "initialDelaySeconds" 5 "periodSeconds" 10)))
+      "securityContext" (dict "allowPrivilegeEscalation" false "readOnlyRootFilesystem" true "capabilities" (dict "drop" (list "ALL")))
+      "resources" .Values.resources))))
+  "service" (dict "main" (dict "controller" "main" "ports" (dict "https" (dict "port" 8443) "health" (dict "port" 8081))))
+  "serviceMonitor" (dict "main" (dict
+    "enabled" .Values.observability.metrics.serviceMonitor.enabled
+    "service" (dict "identifier" "main")
+    "endpoints" (list (dict
+      "port" "https"
+      "scheme" "https"
+      "path" "/metrics"
+      "interval" .Values.observability.metrics.serviceMonitor.interval
+      "bearerTokenFile" "/var/run/secrets/kubernetes.io/serviceaccount/token"
+      "tlsConfig" (dict "insecureSkipVerify" true))))) -}}
+{{- /* Carry the vendored common-chart defaults through so the loader's
+       values.init step merges its scaffolding under our facade-mapped keys. */ -}}
+{{- $_ := set $values "common" (.Values.common | default dict) -}}
+{{- $ctx := deepCopy . -}}
+{{- $_ := set $ctx "Values" $values -}}
+{{ include "bjw-s.common.loader.all" $ctx }}

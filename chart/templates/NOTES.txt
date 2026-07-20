@@ -1,0 +1,26 @@
+nomad-operator {{ .Chart.AppVersion }} installed in namespace "{{ .Release.Namespace }}".
+
+CRDs installed by this chart: {{ .Values.crds.install }}
+Reconciled kinds: NomadCluster, NomadPool, NomadNamespace, NomadNode, NomadJob
+  (apiGroup nomad.operator.io/v1alpha1)
+
+REQUIRED CLUSTER PREREQUISITE — Gateway API (experimental channel):
+  The manager registers the Gateway API v1 and v1alpha2 schemes at startup
+  (Gateway, TCPRoute, TLSRoute). If those CRDs are absent the manager fails
+  cache-sync and CrashLoopBackOffs. This chart does NOT bundle them. Install
+  the experimental-channel CRDs BEFORE the operator, e.g.:
+
+    kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/experimental-install.yaml
+
+Metrics:
+  The controller serves Prometheus metrics over HTTPS on :8443, protected by
+  the manager's authn/authz filter.
+{{- if .Values.observability.metrics.serviceMonitor.enabled }}
+  A ServiceMonitor was rendered (requires the Prometheus Operator CRDs).
+{{- else }}
+  Set observability.metrics.serviceMonitor.enabled=true to scrape it with the
+  Prometheus Operator.
+{{- end }}
+
+Verify the rollout:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/nomad-operator

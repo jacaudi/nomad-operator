@@ -1,0 +1,213 @@
+{{- if .Values.crds.install }}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+{{- if .Values.crds.keep }}
+    helm.sh/resource-policy: keep
+{{- end }}
+  name: nomadnodes.nomad.operator.io
+spec:
+  group: nomad.operator.io
+  names:
+    kind: NomadNode
+    listKind: NomadNodeList
+    plural: nomadnodes
+    singular: nomadnode
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.clusterRef.name
+      name: Cluster
+      type: string
+    - jsonPath: .status.status
+      name: Status
+      type: string
+    - jsonPath: .status.schedulingEligibility
+      name: Eligible
+      type: string
+    - jsonPath: .status.draining
+      name: Draining
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: NomadNode is the Schema for the nomadnodes API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              NomadNodeSpec is the desired state of a NomadNode. clusterRef + nodeName are
+              the immutable identity; eligible + drain are the user's control surface.
+            properties:
+              clusterRef:
+                description: NodeReference names a NomadCluster in the same namespace.
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+              drain:
+                description: Drain, when set, requests a drain; remove it to cancel.
+                properties:
+                  deadline:
+                    description: |-
+                      Deadline is how long remaining allocations may take to migrate before
+                      they are force-stopped. It is a POINTER so unset is distinguishable from
+                      an explicit zero: nil → the operator substitutes 1h; an explicit value is
+                      used verbatim, where 0 means "no deadline" (drain gracefully forever).
+                    type: string
+                  ignoreSystemJobs:
+                    type: boolean
+                type: object
+              eligible:
+                default: true
+                description: |-
+                  Eligible is the scheduling-eligibility target when the node is not
+                  actively draining. Defaults true for a hand-omitted field; it is NOT
+                  omitempty, so the reflector's seeded value — including a deliberate false
+                  for an observed-ineligible node — is always sent and never clobbered by
+                  the default.
+                type: boolean
+              nodeName:
+                description: NodeName is the exact Nomad node Name this CR represents
+                  (the match key).
+                type: string
+            required:
+            - clusterRef
+            - nodeName
+            type: object
+            x-kubernetes-validations:
+            - message: nodeName is immutable
+              rule: self.nodeName == oldSelf.nodeName
+            - message: clusterRef.name is immutable
+              rule: self.clusterRef.name == oldSelf.clusterRef.name
+          status:
+            description: NomadNodeStatus is the observed state, all operator-owned
+              (mirror/resolved).
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              datacenter:
+                type: string
+              drainObservedGeneration:
+                description: |-
+                  DrainObservedGeneration records the spec generation at which the current
+                  drain was issued, so a completed drain converges (design §3.3).
+                format: int64
+                type: integer
+              draining:
+                type: boolean
+              lastDrain:
+                description: LastDrainStatus summarizes Nomad's Node.LastDrain (DrainMetadata).
+                properties:
+                  startedAt:
+                    format: date-time
+                    type: string
+                  status:
+                    type: string
+                  updatedAt:
+                    format: date-time
+                    type: string
+                type: object
+              nodeClass:
+                type: string
+              nodeID:
+                type: string
+              nodePool:
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              schedulingEligibility:
+                type: string
+              status:
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+{{- end }}

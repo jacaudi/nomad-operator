@@ -1,0 +1,25 @@
+---
+apiVersion: v2
+name: nomad-operator
+description: Kubernetes operator that reconciles HashiCorp Nomad clusters, pools, namespaces, nodes, and jobs declaratively, with Gateway API integration
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.31.0-0"
+keywords:
+  - nomad
+  - hashicorp
+  - gateway-api
+  - operator
+  - kubernetes
+home: https://github.com/jacaudi/nomad-operator
+sources:
+  - https://github.com/jacaudi/nomad-operator
+maintainers:
+  - name: jacaudi
+annotations:
+  artifacthub.io/license: Apache-2.0
+dependencies:
+  - name: common
+    repository: https://bjw-s-labs.github.io/helm-charts/
+    version: 5.0.1

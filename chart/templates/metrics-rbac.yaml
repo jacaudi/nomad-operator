@@ -1,0 +1,54 @@
+# RBAC for the secure (HTTPS, :8443) metrics endpoint. The manager's
+# authn/authz filter delegates to the Kubernetes API via TokenReview /
+# SubjectAccessReview, so the operator ServiceAccount needs these grants
+# (config/rbac/metrics_auth_role.yaml). Without them the metrics endpoint
+# rejects every scrape.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nomad-operator-metrics-auth
+  labels:
+    {{- include "nomad-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  - apiGroups:
+      - authorization.k8s.io
+    resources:
+      - subjectaccessreviews
+    verbs:
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nomad-operator-metrics-auth
+  labels:
+    {{- include "nomad-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nomad-operator-metrics-auth
+subjects:
+  - kind: ServiceAccount
+    name: nomad-operator
+    namespace: {{ .Release.Namespace }}
+---
+# Grants HTTP GET on /metrics. Bind this to a Prometheus scraper's
+# ServiceAccount (config/rbac/metrics_reader_role.yaml). Left unbound by the
+# chart so cluster operators can attach it to their monitoring stack.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nomad-operator-metrics-reader
+  labels:
+    {{- include "nomad-operator.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs:
+      - /metrics
+    verbs:
+      - get

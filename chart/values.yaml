@@ -1,0 +1,56 @@
+# Facade values for the nomad-operator chart. The HelmRelease author sets
+# these; templates/common.yaml maps them onto the bjw-s common schema.
+
+image:
+  # -- Container image repository for the controller-manager.
+  repository: ghcr.io/jacaudi/nomad-operator
+  # -- Container image tag. Empty → use `.Chart.AppVersion`.
+  tag: ""
+  # -- Container image pull policy.
+  pullPolicy: IfNotPresent
+
+# -- Override-only / informational. bjw-s common renders the ServiceAccount
+# and Deployment in `.Release.Namespace`, so that is the single source of
+# truth for the operator's namespace. Leave this empty (the intended path)
+# and install into the target namespace via `helm --namespace` / Flux
+# HelmRelease `targetNamespace`. If set non-empty it MUST equal the release
+# namespace — a divergent value fails the install fast
+# (templates/common.yaml guard).
+namespace: ""
+
+crds:
+  # -- Whether to render the 5 bundle CRDs as chart templates at all.
+  install: true
+  # -- Stamp `helm.sh/resource-policy: keep` on every CRD so they survive
+  # `helm uninstall` (data-safety default).
+  keep: true
+
+# -- Controller-manager Deployment replica count. `>1` requires
+# `leaderElection.enabled` (the chart wires `--leader-elect=true`) so only
+# one replica actively reconciles; the others are warm standby (HA).
+replicas: 1
+
+leaderElection:
+  # -- Controller-manager leader election (controller-runtime Lease-based
+  # HA). Required when `replicas > 1`.
+  enabled: true
+
+observability:
+  metrics:
+    serviceMonitor:
+      # -- Render a Prometheus-Operator `ServiceMonitor` scraping the
+      # operator's secure `/metrics` endpoint (HTTPS on :8443). Requires
+      # Prometheus Operator's `monitoring.coreos.com/v1` CRDs to be
+      # installed in the cluster.
+      enabled: false
+      # -- Scrape interval for the ServiceMonitor endpoint.
+      interval: 30s
+
+# -- Resource requests + limits for the controller-manager container.
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi

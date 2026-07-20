@@ -1,0 +1,105 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nomad-operator
+  labels:
+    {{- include "nomad-operator.labels" . | nindent 4 }}
+# Rules copied verbatim from config/rbac/role.yaml (kubebuilder aggregate).
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - secrets
+      - services
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  - apiGroups:
+      - apps
+    resources:
+      - statefulsets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - gateways
+      - httproutes
+      - tcproutes
+      - tlsroutes
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - nomad.operator.io
+    resources:
+      - nomadclusters
+      - nomadjobs
+      - nomadnamespaces
+      - nomadnodes
+      - nomadpools
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - nomad.operator.io
+    resources:
+      - nomadclusters/finalizers
+      - nomadjobs/finalizers
+      - nomadnamespaces/finalizers
+      - nomadpools/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - nomad.operator.io
+    resources:
+      - nomadclusters/status
+      - nomadjobs/status
+      - nomadnamespaces/status
+      - nomadnodes/status
+      - nomadpools/status
+    verbs:
+      - get
+      - patch
+      - update
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
