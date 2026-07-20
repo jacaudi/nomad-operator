@@ -71,9 +71,13 @@ jobs:
             ${{ env.IMAGE }}:${{ needs.release-please.outputs.tag_name }}
             ${{ env.IMAGE }}:latest
 
+  # Independent of build-image: with separate-pull-requests the chart and
+  # operator release in SEPARATE runs, so build-image is skipped in the chart's
+  # run. The appVersion step below pins to the newest published operator release,
+  # so no hard job dependency on build-image is needed (or possible).
   push-chart:
     name: push-chart
-    needs: [release-please, build-image]
+    needs: [release-please]
     if: needs.release-please.outputs.chart_release_created == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -112,6 +116,9 @@ jobs:
         env:
           CHART_VERSION: ${{ needs.release-please.outputs.chart_version }}
         run: |
-          helm dependency build chart/
+          # No `helm dependency build` — the common library is vendored at
+          # chart/charts/common-5.0.1.tgz, which `helm package` uses directly
+          # (a bare `helm dependency build` fails on a fresh runner: the bjw-s
+          # repo isn't registered).
           helm package chart --version "${CHART_VERSION}"
           helm push "nomad-operator-${CHART_VERSION}.tgz" "${CHART_REGISTRY}"

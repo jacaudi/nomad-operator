@@ -5,6 +5,11 @@ image:
   # -- Container image repository for the controller-manager.
   repository: ghcr.io/jacaudi/nomad-operator
   # -- Container image tag. Empty → use `.Chart.AppVersion`.
+  # NOTE: the PUBLISHED OCI chart sets `appVersion` to a real operator image tag
+  # (`vX.Y.Z`) at release time, so leaving this empty is correct there. When
+  # installing from a GIT CHECKOUT, the in-tree `appVersion` (e.g. `0.1.0`) has
+  # no matching published image — set this to a released tag (e.g. `latest` or
+  # `vX.Y.Z`) or install the published OCI chart instead.
   tag: ""
   # -- Container image pull policy.
   pullPolicy: IfNotPresent
