@@ -2,7 +2,7 @@
 
 - **Severity:** Critical (every authenticated operator→Nomad call 403s after recreate) · **Area:** controller / ACL bootstrap (`internal/controller/security.go`)
 - **Source:** live kind end-to-end run, 2026-07-19.
-- **Status:** RESOLVED — 2026-07-19, commit `__COMMIT__` (this branch), TDD regression test + idempotent-self-heal fix.
+- **Status:** RESOLVED — 2026-07-19, commit `43f195f` on branch `worktree-fix-acl-rebootstrap-on-recreate`, TDD regression test + idempotent-self-heal fix.
 
 ## Resolution
 
