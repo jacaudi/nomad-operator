@@ -10,6 +10,18 @@
   "semanticCommitType": "fix",
   "semanticCommitScope": "deps",
   "commitMessagePrefix": "fix(deps):",
+  "packageRules": [
+    {
+      "description": "Refresh the vendored bjw-s common chart tarball + Chart.lock when the Helm dependency bumps (Renovate edits Chart.yaml version; this re-materializes chart/charts/common-*.tgz + Chart.lock so `helm package` in CI keeps working offline)",
+      "matchManagers": ["helmv3"],
+      "matchPackageNames": ["common"],
+      "postUpgradeTasks": {
+        "commands": ["helm dependency update chart/"],
+        "fileFilters": ["chart/Chart.lock", "chart/charts/*.tgz"],
+        "executionMode": "branch"
+      }
+    }
+  ],
   "customManagers": [
     {
       "customType": "regex",
