@@ -38,7 +38,7 @@ func TestManagedGatewayListeners(t *testing.T) {
 	rpcListeners := gw.Spec.Listeners[1:]
 	seenPorts := make(map[gwapiv1.PortNumber]bool, len(rpcListeners))
 	for ordinal, l := range rpcListeners {
-		wantPort := gwapiv1.PortNumber(nc.Spec.ExternalAccess.Gateway.RPCPorts[ordinal])
+		wantPort := nc.Spec.ExternalAccess.Gateway.RPCPorts[ordinal]
 		if l.Port != wantPort {
 			t.Errorf("rpc listener[%d] port = %d, want %d", ordinal, l.Port, wantPort)
 		}
@@ -104,13 +104,13 @@ func sharedGatewayFixture(ns string, rpcPorts []int32) *gwapiv1.Gateway {
 		Port:          gwapiv1.PortNumber(portHTTP),
 		Protocol:      gwapiv1.TLSProtocolType,
 		Hostname:      ptrHostname("nomad.example.com"),
-		TLS:           &gwapiv1.GatewayTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)},
+		TLS:           &gwapiv1.ListenerTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)},
 		AllowedRoutes: admitAll,
 	})
 	for ordinal, p := range rpcPorts {
 		listeners = append(listeners, gwapiv1.Listener{
 			Name:          gwapiv1.SectionName(listenerNameRPC(ordinal)),
-			Port:          gwapiv1.PortNumber(p),
+			Port:          p,
 			Protocol:      gwapiv1.TCPProtocolType,
 			AllowedRoutes: admitAll,
 		})
@@ -285,7 +285,7 @@ var _ = Describe("Existing-mode gateway reason (#6)", func() {
 				GatewayClassName: "cilium",
 				Listeners: []gwapiv1.Listener{
 					{Name: listenerNameHTTP, Port: gwapiv1.PortNumber(portHTTP), Protocol: gwapiv1.TLSProtocolType,
-						Hostname: ptrHostname("nomad.example.com"), TLS: &gwapiv1.GatewayTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)}},
+						Hostname: ptrHostname("nomad.example.com"), TLS: &gwapiv1.ListenerTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)}},
 					{Name: gwapiv1.SectionName(listenerNameRPC(0)), Port: 14647, Protocol: gwapiv1.TCPProtocolType},
 					{Name: gwapiv1.SectionName(listenerNameRPC(1)), Port: 24647, Protocol: gwapiv1.TCPProtocolType},
 					{Name: gwapiv1.SectionName(listenerNameRPC(2)), Port: 34647, Protocol: gwapiv1.TCPProtocolType},
@@ -315,7 +315,7 @@ var _ = Describe("Existing-mode gateway reason (#6)", func() {
 				GatewayClassName: "cilium",
 				Listeners: []gwapiv1.Listener{
 					{Name: listenerNameHTTP, Port: gwapiv1.PortNumber(portHTTP), Protocol: gwapiv1.TLSProtocolType,
-						Hostname: ptrHostname("wrong.example.com"), TLS: &gwapiv1.GatewayTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)}},
+						Hostname: ptrHostname("wrong.example.com"), TLS: &gwapiv1.ListenerTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)}},
 					{Name: gwapiv1.SectionName(listenerNameRPC(0)), Port: 14647, Protocol: gwapiv1.TCPProtocolType},
 					{Name: gwapiv1.SectionName(listenerNameRPC(1)), Port: 24647, Protocol: gwapiv1.TCPProtocolType},
 					{Name: gwapiv1.SectionName(listenerNameRPC(2)), Port: 34647, Protocol: gwapiv1.TCPProtocolType},
@@ -342,7 +342,7 @@ var _ = Describe("Existing-mode gateway reason (#6)", func() {
 				GatewayClassName: "cilium",
 				Listeners: []gwapiv1.Listener{
 					{Name: listenerNameHTTP, Port: gwapiv1.PortNumber(portHTTP), Protocol: gwapiv1.TLSProtocolType,
-						Hostname: ptrHostname("nomad.example.com"), TLS: &gwapiv1.GatewayTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)}},
+						Hostname: ptrHostname("nomad.example.com"), TLS: &gwapiv1.ListenerTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)}},
 					{Name: gwapiv1.SectionName(listenerNameRPC(0)), Port: 14647, Protocol: gwapiv1.HTTPProtocolType},
 					{Name: gwapiv1.SectionName(listenerNameRPC(1)), Port: 24647, Protocol: gwapiv1.TCPProtocolType},
 					{Name: gwapiv1.SectionName(listenerNameRPC(2)), Port: 34647, Protocol: gwapiv1.TCPProtocolType},
@@ -376,7 +376,7 @@ var _ = Describe("Existing-mode gateway reason (#6)", func() {
 				GatewayClassName: "cilium",
 				Listeners: []gwapiv1.Listener{
 					{Name: listenerNameHTTP, Port: gwapiv1.PortNumber(portHTTP), Protocol: gwapiv1.TLSProtocolType,
-						Hostname: ptrHostname("nomad.example.com"), TLS: &gwapiv1.GatewayTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)},
+						Hostname: ptrHostname("nomad.example.com"), TLS: &gwapiv1.ListenerTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)},
 						AllowedRoutes: excludeSelector},
 					{Name: gwapiv1.SectionName(listenerNameRPC(0)), Port: 14647, Protocol: gwapiv1.TCPProtocolType},
 					{Name: gwapiv1.SectionName(listenerNameRPC(1)), Port: 24647, Protocol: gwapiv1.TCPProtocolType},
@@ -430,7 +430,7 @@ var _ = Describe("Existing-mode gateway reason (#6)", func() {
 				GatewayClassName: "cilium",
 				Listeners: []gwapiv1.Listener{
 					{Name: listenerNameHTTP, Port: gwapiv1.PortNumber(portHTTP), Protocol: gwapiv1.TLSProtocolType,
-						Hostname: ptrHostname("nomad.example.com"), TLS: &gwapiv1.GatewayTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)},
+						Hostname: ptrHostname("nomad.example.com"), TLS: &gwapiv1.ListenerTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)},
 						AllowedRoutes: admitAll},
 					{Name: gwapiv1.SectionName(listenerNameRPC(0)), Port: 14647, Protocol: gwapiv1.TCPProtocolType, AllowedRoutes: excludeSelector},
 					{Name: gwapiv1.SectionName(listenerNameRPC(1)), Port: 24647, Protocol: gwapiv1.TCPProtocolType, AllowedRoutes: admitAll},

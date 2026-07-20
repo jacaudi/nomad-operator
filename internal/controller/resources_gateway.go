@@ -19,7 +19,7 @@ const listenerNameHTTP = "http"
 func listenerNameRPC(ordinal int) string { return fmt.Sprintf("rpc-%d", ordinal) }
 
 func ptrHostname(h string) *gwapiv1.Hostname    { return new(gwapiv1.Hostname(h)) }
-func ptrPortNumber(p int32) *gwapiv1.PortNumber { return new(gwapiv1.PortNumber(p)) }
+func ptrPortNumber(p int32) *gwapiv1.PortNumber { return new(p) }
 
 // buildManagedGateway builds the operator-owned Gateway (Managed mode): one HTTP
 // listener with TLS SNI passthrough, plus one TCP listener per RPC port (RPC 4647
@@ -33,12 +33,12 @@ func buildManagedGateway(nc *nomadv1alpha1.NomadCluster) *gwapiv1.Gateway {
 		Port:     gwapiv1.PortNumber(portHTTP),
 		Protocol: gwapiv1.TLSProtocolType,
 		Hostname: ptrHostname(nc.Spec.ExternalAccess.Gateway.HTTPHostname),
-		TLS:      &gwapiv1.GatewayTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)},
+		TLS:      &gwapiv1.ListenerTLSConfig{Mode: new(gwapiv1.TLSModePassthrough)},
 	})
 	for ordinal, p := range nc.Spec.ExternalAccess.Gateway.RPCPorts {
 		listeners = append(listeners, gwapiv1.Listener{
 			Name:     gwapiv1.SectionName(listenerNameRPC(ordinal)),
-			Port:     gwapiv1.PortNumber(p),
+			Port:     p,
 			Protocol: gwapiv1.TCPProtocolType,
 		})
 	}
@@ -197,7 +197,7 @@ func (r *NomadClusterReconciler) ensureExistingGateway(ctx context.Context, nc *
 	}
 	for ordinal, p := range nc.Spec.ExternalAccess.Gateway.RPCPorts {
 		l, ok := byName[gwapiv1.SectionName(listenerNameRPC(ordinal))]
-		if !ok || l.Protocol != gwapiv1.TCPProtocolType || int32(l.Port) != p {
+		if !ok || l.Protocol != gwapiv1.TCPProtocolType || l.Port != p {
 			setNotReady("RPCListenerInvalid",
 				fmt.Sprintf("referenced Gateway lacks a valid TCP listener for RPC port %d", p))
 			return "", false, nil
