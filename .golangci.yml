@@ -45,6 +45,13 @@ linters:
           - dupl
           - lll
         path: internal/*
+      # Noisy in tests: unused-variation helper params, repeated literals, and
+      # slice prealloc are idiomatic in table/spec test code.
+      - linters:
+          - unparam
+          - goconst
+          - prealloc
+        path: _test\.go
     paths:
       - third_party$
       - builtin$

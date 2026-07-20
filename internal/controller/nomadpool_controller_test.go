@@ -253,7 +253,7 @@ var _ = Describe("NomadPool reconciler: poolName collision", func() {
 		cond := meta.FindStatusCondition(got.Status.Conditions, nomadv1alpha1.NomadPoolCondReady)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Reason).NotTo(Equal(nomadv1alpha1.ReasonPoolNameConflict), "a Terminating sibling must not count as a live conflict")
-		Expect(len(f.registered)).To(BeNumerically(">=", 1), "the replacement pool must be allowed to Register")
+		Expect(f.registered).ToNot(BeEmpty(), "the replacement pool must be allowed to Register")
 	})
 })
 
