@@ -3,7 +3,7 @@ module github.com/jacaudi/nomad-operator
 go 1.26.4
 
 require (
-	github.com/hashicorp/nomad/api v0.0.0-20260707172059-5b83b133998a
+	github.com/hashicorp/nomad/api v0.0.0-20260716204536-d4a17d26a66d
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
 	k8s.io/api v0.35.0
