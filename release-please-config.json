@@ -26,7 +26,8 @@
       "release-type": "helm",
       "component": "chart",
       "include-component-in-tag": false,
-      "include-v-in-tag": false
+      "include-v-in-tag": false,
+      "include-v-in-release-name": false
     }
   }
 }
