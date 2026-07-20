@@ -36,10 +36,19 @@ jobs:
       chart_tag_name: ${{ steps.rp.outputs['chart--tag_name'] }}
       chart_version: ${{ steps.rp.outputs['chart--version'] }}
     steps:
+      # Mint an installation token from the GitHub App so release-please opens
+      # the release PRs and cuts tags/releases as the app (not github-actions[bot]).
+      # This also bypasses the "Allow GitHub Actions to create and approve pull
+      # requests" repo setting that the default GITHUB_TOKEN would otherwise need.
+      - id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
       - id: rp
         uses: googleapis/release-please-action@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
