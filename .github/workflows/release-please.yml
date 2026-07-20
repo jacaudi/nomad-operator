@@ -1,0 +1,117 @@
+---
+name: release-please
+
+"on":
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Serialize releases so an image is always pushed before the chart that
+# references it.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/jacaudi/nomad-operator
+  CHART_REGISTRY: oci://ghcr.io/jacaudi/charts
+
+jobs:
+  release-please:
+    name: release-please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      # Root package (path "."): outputs are unprefixed.
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      version: ${{ steps.rp.outputs.version }}
+      # Chart package (path "chart"): outputs are prefixed with "chart--".
+      chart_release_created: ${{ steps.rp.outputs['chart--release_created'] }}
+      chart_tag_name: ${{ steps.rp.outputs['chart--tag_name'] }}
+      chart_version: ${{ steps.rp.outputs['chart--version'] }}
+    steps:
+      - id: rp
+        uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build-image:
+    name: build-image
+    needs: [release-please]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ needs.release-please.outputs.tag_name }}
+            ${{ env.IMAGE }}:latest
+
+  push-chart:
+    name: push-chart
+    needs: [release-please, build-image]
+    if: needs.release-please.outputs.chart_release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: Pin chart appVersion to the latest operator image tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPERATOR_TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          # Prefer the operator tag released in this same run; otherwise fall
+          # back to the newest published vX.Y.Z operator release so the chart
+          # always references an image that exists in the registry.
+          app="${OPERATOR_TAG}"
+          if [ -z "${app}" ]; then
+            app="$(gh release list --limit 50 --json tagName \
+              --jq '[.[].tagName | select(test("^v[0-9]"))] | .[0]')"
+          fi
+          if [ -z "${app}" ]; then
+            echo "::error::could not determine operator image tag for chart appVersion"
+            exit 1
+          fi
+          echo "Setting chart appVersion to ${app}"
+          APP="${app}" yq -i '.appVersion = strenv(APP)' chart/Chart.yaml
+      - name: Log in to GHCR (Helm)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Package and push chart
+        env:
+          CHART_VERSION: ${{ needs.release-please.outputs.chart_version }}
+        run: |
+          helm dependency build chart/
+          helm package chart --version "${CHART_VERSION}"
+          helm push "nomad-operator-${CHART_VERSION}.tgz" "${CHART_REGISTRY}"
