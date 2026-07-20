@@ -10,7 +10,11 @@ bin/
 .docs.tmp/
 .claude/worktrees/
 
-# Session handoff prompts (scratch)
+# Development-process docs — kept local, not tracked
+docs/development/designs/
+docs/development/design/
+docs/development/plans/
+docs/development/issues/
 docs/development/prompts/
 
 # Subagent-driven-development process scratch (ledger, briefs, reports, diffs)
