@@ -341,11 +341,19 @@ var _ = Describe("Managed provisioning", func() {
 		Expect(k8s.Get(ctx, types.NamespacedName{Name: names(nc).TokenSecret, Namespace: ns}, &tokenSec)).To(Succeed())
 		Expect(tokenSec.Annotations["nomad.operator.io/acl-bootstrapped"]).To(Equal("true"))
 		Expect(tokenSec.Data["token"]).To(Equal(tokenBeforeRetry)) // same token re-submitted
+		rvAfterConfirm := tokenSec.ResourceVersion
 
-		// Steady state: once confirmed, a further reconcile must NOT re-bootstrap
-		// (the existing Secret-gated idempotency guarantee still holds).
+		// Steady state: a further reconcile STILL re-attempts the idempotent
+		// ACLBootstrap (detecting a recreated/fresh cluster requires asking Nomad
+		// every reconcile), but stays Ready and does NOT churn the already-
+		// annotated Secret's resourceVersion.
 		reconcileOnce(r, "retry", ns)
-		Expect(fake.bootstrapCalls).To(Equal(2))
+		Expect(fake.bootstrapCalls).To(Equal(3))
+		var afterSteady nomadv1alpha1.NomadCluster
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: "retry", Namespace: ns}, &afterSteady)).To(Succeed())
+		Expect(afterSteady.Status.Phase).To(Equal(nomadv1alpha1.PhaseReady))
+		Expect(k8s.Get(ctx, types.NamespacedName{Name: names(nc).TokenSecret, Namespace: ns}, &tokenSec)).To(Succeed())
+		Expect(tokenSec.ResourceVersion).To(Equal(rvAfterConfirm)) // no spurious Update
 	})
 
 	It("populates status.members and a real status.quorum from ServerHealth once Ready", func() {
