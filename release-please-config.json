@@ -3,7 +3,7 @@
   "separate-pull-requests": false,
   "release-as": "0.1.0",
   "pull-request-title-pattern": "chore: release nomad-operator ${version}",
-  "group-pull-request-title-pattern": "chore: release nomad-operator (operator image + Helm chart)",
+  "group-pull-request-title-pattern": "chore: release nomad-operator ${version}",
   "include-component-in-tag": false,
   "changelog-sections": [
     { "type": "feat", "section": "Features" },
