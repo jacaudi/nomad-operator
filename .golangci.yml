@@ -8,7 +8,9 @@ linters:
     - dupl
     - errcheck
     - ginkgolinter
-    - goconst
+    # goconst disabled: golangci-lint v2.12.2's goconst walks composite literals,
+    # over-reporting coincidental string repeats (port names, "true", map keys) with
+    # no suppression at this version. Re-enable when exclude-types is configurable.
     - gocyclo
     - govet
     - ineffassign
@@ -45,11 +47,10 @@ linters:
           - dupl
           - lll
         path: internal/*
-      # Noisy in tests: unused-variation helper params, repeated literals, and
-      # slice prealloc are idiomatic in table/spec test code.
+      # Noisy in tests: unused-variation helper params and slice prealloc are
+      # idiomatic in table/spec test code.
       - linters:
           - unparam
-          - goconst
           - prealloc
         path: _test\.go
     paths:
