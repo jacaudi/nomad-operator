@@ -35,4 +35,11 @@ jobs:
       - name: Running Test e2e
         run: |
           go mod tidy
+          # The manager watches Gateway API types (Gateway/TCPRoute/TLSRoute);
+          # without their CRDs it crashloops on cache-sync and the
+          # "should run successfully" check fails. Create the cluster, install
+          # the vendored Gateway API CRDs, then run the suite (its own
+          # setup-test-e2e is a no-op once the cluster exists).
+          make setup-test-e2e
+          kubectl apply -f config/crd/gateway-api/
           make test-e2e
