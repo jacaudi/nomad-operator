@@ -1,7 +1,8 @@
 ---
 apiVersion: v2
 name: nomad-operator
-description: Kubernetes operator that reconciles HashiCorp Nomad clusters, pools, namespaces, nodes, and jobs declaratively, with Gateway API integration
+description: Kubernetes operator that reconciles HashiCorp Nomad clusters,
+  pools, namespaces, nodes, and jobs declaratively, with Gateway API integration
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
