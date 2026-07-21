@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.0](https://github.com/jacaudi/nomad-operator/compare/v0.1.0...v0.1.0) (2026-07-21)
+
+
+### Bug Fixes
+
+* **deps:** Update actions/checkout action to v7.0.1 ([#15](https://github.com/jacaudi/nomad-operator/issues/15)) ([11c6a82](https://github.com/jacaudi/nomad-operator/commit/11c6a822450ca83fabf70e36aad370d5b101e48e))
+
 ## 0.1.0 (2026-07-20)
 
 
