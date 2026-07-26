@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.0](https://github.com/jacaudi/nomad-operator/compare/v0.1.0...v0.1.0) (2026-07-26)
+
+
+### Bug Fixes
+
+* **deps:** Update actions/checkout action to v7.0.1 ([#15](https://github.com/jacaudi/nomad-operator/issues/15)) ([11c6a82](https://github.com/jacaudi/nomad-operator/commit/11c6a822450ca83fabf70e36aad370d5b101e48e))
+* **deps:** Update kubernetes-client-libraries to v0.36.3 ([#17](https://github.com/jacaudi/nomad-operator/issues/17)) ([01403ac](https://github.com/jacaudi/nomad-operator/commit/01403acf4fda773fe198aab433d86655883fe286))
+
 ## 0.1.0 (2026-07-20)
 
 
