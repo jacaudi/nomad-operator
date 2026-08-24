@@ -3,7 +3,7 @@ module github.com/jacaudi/nomad-operator
 go 1.26.4
 
 require (
-	github.com/hashicorp/nomad/api v0.0.0-20260716204536-d4a17d26a66d
+	github.com/hashicorp/nomad/api v0.0.0-20260821123358-aa026cc99cfb
 	github.com/onsi/ginkgo/v2 v2.32.1
 	github.com/onsi/gomega v1.42.1
 	k8s.io/api v0.36.4
@@ -54,9 +54,7 @@ require (
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.7 // indirect
 	github.com/hashicorp/cronexpr v1.1.3 // indirect
-	github.com/hashicorp/errwrap v1.0.0 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
-	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/hashicorp/go-rootcerts v1.0.2 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
