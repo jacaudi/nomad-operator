@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.0](https://github.com/jacaudi/nomad-operator/compare/v0.1.0...v0.1.0) (2026-09-06)
+
+
+### Bug Fixes
+
+* **deps:** Update actions/checkout action to v7.0.1 ([#15](https://github.com/jacaudi/nomad-operator/issues/15)) ([11c6a82](https://github.com/jacaudi/nomad-operator/commit/11c6a822450ca83fabf70e36aad370d5b101e48e))
+* **deps:** Update kubernetes-client-libraries to v0.36.3 ([#17](https://github.com/jacaudi/nomad-operator/issues/17)) ([01403ac](https://github.com/jacaudi/nomad-operator/commit/01403acf4fda773fe198aab433d86655883fe286))
+* **deps:** Update kubernetes-client-libraries to v0.36.4 ([#24](https://github.com/jacaudi/nomad-operator/issues/24)) ([ccc6056](https://github.com/jacaudi/nomad-operator/commit/ccc60567bcc96c9c669eda40d2854afdce8d7528))
+* **deps:** Update module github.com/onsi/ginkgo/v2 to v2.32.1 ([#18](https://github.com/jacaudi/nomad-operator/issues/18)) ([f8f118f](https://github.com/jacaudi/nomad-operator/commit/f8f118f1bca9e955e79133a01d5d62e27daf8b7a))
+* **deps:** Update module sigs.k8s.io/gateway-api to v1.6.2 ([#28](https://github.com/jacaudi/nomad-operator/issues/28)) ([efffa78](https://github.com/jacaudi/nomad-operator/commit/efffa78b3bad9626d164f88702320e74c58dec23))
+
 ## 0.1.0 (2026-07-20)
 
 
