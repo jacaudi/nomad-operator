@@ -4,8 +4,8 @@ go 1.26.4
 
 require (
 	github.com/hashicorp/nomad/api v0.0.0-20260716204536-d4a17d26a66d
-	github.com/onsi/ginkgo/v2 v2.32.1
-	github.com/onsi/gomega v1.42.1
+	github.com/onsi/ginkgo/v2 v2.32.2
+	github.com/onsi/gomega v1.43.0
 	k8s.io/api v0.36.4
 	k8s.io/apimachinery v0.36.4
 	k8s.io/client-go v0.36.4
