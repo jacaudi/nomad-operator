@@ -97,7 +97,7 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v5
         with:
-          version: v3.16.4
+          version: v3.22.1
       - name: Pin chart appVersion to the latest operator image tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
